@@ -1,3 +1,10 @@
+## [0.3.0] – 2025-09-21
+### Added
+- Introduced `src/core/journal.py` for recording trades into `journal.csv`.
+- Added `schemas/journal_template.csv` with clean headers for paper-trading.
+- Added `scripts/analyze_week.py` to summarize trades and generate weekly reports.
+- Updated `README.md` with full repo structure and usage instructions.
+
 ## [0.2.4] – 2025-09-21
 ### Fixed
 - `score_snapshots()` now supports Polygon’s `prev_close` / `last_price` fields and falls back to `todays_change_pct`.
