@@ -8,6 +8,7 @@ from datetime import datetime
 import pytz
 
 from src.adapters.polygon_adapter import fetch_snapshots
+from core.scoring import score_snapshots, log_top_movers
 
 
 # --- Load config ---
@@ -16,6 +17,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/scanner.yam
 def load_config(path=CONFIG_PATH):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
 
 # --- Logging setup ---
 def setup_logger(log_path):
@@ -28,18 +30,24 @@ def setup_logger(log_path):
     )
     return logging.getLogger("scanner")
 
+
 # --- Time helpers ---
 def within_premarket_window(cfg):
     tz = pytz.timezone("America/New_York")
     now = datetime.now(tz)
 
-    start = datetime.combine(now.date(), datetime.strptime(cfg["premarket"]["start_time"], "%H:%M").time())
-    end = datetime.combine(now.date(), datetime.strptime(cfg["premarket"]["end_time"], "%H:%M").time())
+    start = datetime.combine(
+        now.date(), datetime.strptime(cfg["premarket"]["start_time"], "%H:%M").time()
+    )
+    end = datetime.combine(
+        now.date(), datetime.strptime(cfg["premarket"]["end_time"], "%H:%M").time()
+    )
 
     start = tz.localize(start)
     end = tz.localize(end)
 
     return start <= now <= end
+
 
 # --- Main loop ---
 def run():
@@ -51,14 +59,16 @@ def run():
 
     while within_premarket_window(cfg):
         try:
-            tickers = fetch_snapshots(limit=50)
-            if tickers:
-                logger.info(f"Fetched {len(tickers)} tickers, sample: {tickers[0]}")
-            else:
-                logger.warning("No tickers returned this cycle")
+            snapshots = fetch_snapshots(limit=50)
 
-            # TODO: Compute gap %, RVOL, ATR stretch
-            # TODO: Score & rank Top 5
+            if snapshots:
+                logger.info(f"Fetched {len(snapshots)} tickers, sample: {list(snapshots.keys())[:3]}")
+                scored = score_snapshots(snapshots)
+                log_top_movers(scored, n=5)
+            else:
+                logger.warning("No snapshots returned this cycle")
+
+            # TODO: Add RVOL, ATR stretch
             # TODO: Write watchlist.csv & validate schema
 
         except Exception as e:
@@ -69,10 +79,15 @@ def run():
 
     logger.info("Premarket window closed. Scanner stopped.")
 
+
 if __name__ == "__main__":
-    import sys
     if "--once" in sys.argv:
-        tickers = fetch_snapshots(limit=5)
-        print(f"Fetched {len(tickers)} tickers, sample:", tickers[0] if tickers else "none")
+        snapshots = fetch_snapshots(limit=50)
+        if snapshots:
+            print(f"Fetched {len(snapshots)} tickers, sample: {list(snapshots.keys())[:3]}")
+            scored = score_snapshots(snapshots)
+            log_top_movers(scored, n=5)
+        else:
+            print("No snapshots returned")
     else:
         run()
