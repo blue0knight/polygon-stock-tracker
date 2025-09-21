@@ -1,0 +1,29 @@
+# --- Secrets ---
+.env
+*.key
+*.pem
+
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+
+# --- macOS / Editors ---
+.DS_Store
+.vscode/
+
+# --- Project Data (local only) ---
+data/
+output/
+logs/
+backtest/
+
+# --- Artifacts ---
+*.parquet
+*.sqlite
+*.db
+*.xlsx
+*.csv
+
+# --- Allow CSV templates in schemas (not actual data) ---
+!schemas/*.csv
