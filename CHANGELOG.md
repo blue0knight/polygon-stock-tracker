@@ -14,3 +14,12 @@
   - `output` block (paths for watchlist, missed, logs, schema).
   - `pump_prone` block (earliest_entry, time_stop).
   - `targets` block (T1, T2, stretch levels).
+
+## [0.2.1] – 2025-09-21
+### Added
+- `src/adapters/polygon_adapter.py`: Polygon API adapter for snapshot fetching.
+- `src/scanner/scanner.py`: added `--once` dry-run mode to fetch all tickers (~11,700) and log results.
+- `scripts/test_fetch.py`: standalone script to validate Polygon connectivity.
+
+### Changed
+- Minor logging improvements in scanner for dry-run mode.
