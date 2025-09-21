@@ -26,3 +26,18 @@ buffer:
 risk:
   max_risk_pct: 0.5        # max NAV risk per trade
   daily_loss_cap_pct: 1.0  # stop trading for day
+
+output:
+  watchlist: "output/watchlist.csv"
+  missed: "output/missed.csv"
+  log: "logs/scanner.log"
+  schema: "schemas/watchlist.schema.json"
+
+pump_prone:
+  earliest_entry: "09:35"
+  time_stop: "11:30"
+
+targets:
+  t1: 0.10
+  t2: 0.18
+  stretch: 0.22
