@@ -1,0 +1,2 @@
+ticker,plan_type,entry_trigger,stop_hint,t1_hint,t2_hint,stretch,shares,entry_price,total_cost,exit_price,pl$,pl%
+,,,,,,,,,"=IF(AND(ISNUMBER(H2),ISNUMBER(I2)),H2*I2,"""")",,"=IF(AND(ISNUMBER(I2),ISNUMBER(H2)), IF(ISNUMBER(K2),(K2-I2)*H2, IF(ISNUMBER(E2),(E2-I2)*H2,"""")),"""")","=IF(ISNUMBER(I2), IF(ISNUMBER(K2),(K2-I2)/I2*100, IF(ISNUMBER(E2),(E2-I2)/I2*100,"""")),"""")"

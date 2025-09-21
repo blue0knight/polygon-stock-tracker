@@ -1,0 +1,2 @@
+date,ticker,type,signal_time,order_type,entry_price,shares,total_cost,stop_loss,exit_target,high_of_day,time_of_high,close_price,pl$,pl%,notes
+,,,,,,,"=IF(AND(ISNUMBER(F2),ISNUMBER(G2)),F2*G2,"""")",,,,,,"=IF(AND(ISNUMBER(F2),ISNUMBER(G2)), IF(ISNUMBER(M2),(M2-F2)*G2, IF(ISNUMBER(J2),(J2-F2)*G2,"""")),"""")","=IF(ISNUMBER(F2), IF(ISNUMBER(M2),(M2-F2)/F2*100, IF(ISNUMBER(J2),(J2-F2)/F2*100,"""")),"""")",
