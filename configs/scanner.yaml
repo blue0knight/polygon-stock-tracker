@@ -28,8 +28,8 @@ risk:
   daily_loss_cap_pct: 1.0  # stop trading for day
 
 output:
-  watchlist: "data/watchlist.csv"
-  missed: "data/missed.csv"
+  watchlist: "output/watchlist.csv"
+  missed: "output/missed.csv"
   log: "logs/scanner.log"
   schema: "schemas/watchlist.schema.json"
 

@@ -1,3 +1,13 @@
+## [0.2.3] – 2025-09-21
+### Added
+- `src/core/output.py`: helper to write Top-5 movers into `output/watchlist.csv` with schema headers.
+- Integrated `write_watchlist()` into both scanner loop and `--once` dry-run.
+- Appends targets (`t1`, `t2`, `stretch`) from `scanner.yaml`.
+
+### Changed
+- Updated `src/scanner/scanner.py` to handle snapshots as lists, convert to dict, and log + write Top-5 movers.
+
+
 ## [0.2.2] – 2025-09-21
 ### Added
 - `src/core/scoring.py`: Scoring module with gap % calculation, Top-5 ranking, and logging helpers.

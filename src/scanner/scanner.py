@@ -8,7 +8,8 @@ from datetime import datetime
 import pytz
 
 from src.adapters.polygon_adapter import fetch_snapshots
-from core.scoring import score_snapshots, log_top_movers
+from src.core.scoring import score_snapshots, log_top_movers
+from src.core.output import write_watchlist
 
 
 # --- Load config ---
@@ -50,6 +51,7 @@ def within_premarket_window(cfg):
 
 
 # --- Main loop ---
+# --- Main loop ---
 def run():
     cfg = load_config()
     logger = setup_logger(cfg["output"]["log"])
@@ -62,17 +64,20 @@ def run():
             snapshots = fetch_snapshots(limit=50)
 
             if snapshots:
-                logger.info(f"Fetched {len(snapshots)} tickers, sample: {list(snapshots.keys())[:3]}")
-                scored = score_snapshots(snapshots)
+                logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
+                snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
+                scored = score_snapshots(snap_dict)
                 log_top_movers(scored, n=5)
+
+                top5 = scored[:5]
+                write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
             else:
                 logger.warning("No snapshots returned this cycle")
 
             # TODO: Add RVOL, ATR stretch
-            # TODO: Write watchlist.csv & validate schema
+            # TODO: Validate schema
 
         except Exception as e:
-            # Log error but continue loop
             logger.error(f"❌ Error during scan tick: {e}", exc_info=True)
 
         time.sleep(cadence * 60)
@@ -80,14 +85,23 @@ def run():
     logger.info("Premarket window closed. Scanner stopped.")
 
 
+# --- Entrypoint ---
 if __name__ == "__main__":
     if "--once" in sys.argv:
+        cfg = load_config()
+        logger = setup_logger(cfg["output"]["log"])
         snapshots = fetch_snapshots(limit=50)
+
         if snapshots:
-            print(f"Fetched {len(snapshots)} tickers, sample: {list(snapshots.keys())[:3]}")
-            scored = score_snapshots(snapshots)
+            logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
+            snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
+            scored = score_snapshots(snap_dict)
             log_top_movers(scored, n=5)
+
+            top5 = scored[:5]
+            write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
         else:
-            print("No snapshots returned")
+            logger.warning("No snapshots returned")
     else:
         run()
+
