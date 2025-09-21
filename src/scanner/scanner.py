@@ -1,10 +1,14 @@
+# --- Imports ---
 import os
 import sys
 import time
 import yaml
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
+
+from src.adapters.polygon_adapter import fetch_snapshots
+
 
 # --- Load config ---
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/scanner.yaml")
@@ -37,7 +41,7 @@ def within_premarket_window(cfg):
 
     return start <= now <= end
 
-# --- Main loop skeleton ---
+# --- Main loop ---
 def run():
     cfg = load_config()
     logger = setup_logger(cfg["output"]["log"])
@@ -47,17 +51,28 @@ def run():
 
     while within_premarket_window(cfg):
         try:
-            # TODO: Fetch tickers from Polygon
+            tickers = fetch_snapshots(limit=50)
+            if tickers:
+                logger.info(f"Fetched {len(tickers)} tickers, sample: {tickers[0]}")
+            else:
+                logger.warning("No tickers returned this cycle")
+
             # TODO: Compute gap %, RVOL, ATR stretch
             # TODO: Score & rank Top 5
             # TODO: Write watchlist.csv & validate schema
-            logger.info("Scanner tick executed (data fetch + scoring not yet implemented)")
+
         except Exception as e:
-            logger.error(f"Error during scan tick: {e}", exc_info=True)
+            # Log error but continue loop
+            logger.error(f"❌ Error during scan tick: {e}", exc_info=True)
 
         time.sleep(cadence * 60)
 
     logger.info("Premarket window closed. Scanner stopped.")
 
 if __name__ == "__main__":
-    run()
+    import sys
+    if "--once" in sys.argv:
+        tickers = fetch_snapshots(limit=5)
+        print(f"Fetched {len(tickers)} tickers, sample:", tickers[0] if tickers else "none")
+    else:
+        run()
