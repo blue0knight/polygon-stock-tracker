@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Recommendations Buy",
+  "type": "object",
+  "properties": {
+    "date": { "type": "string", "format": "date" },
+    "time_et": { "type": "string" },
+    "ticker": { "type": "string" },
+    "rating": { "type": "string" },
+    "plan": { "type": "string" },
+    "trigger": { "type": "number" },
+    "order_type": { "type": "string" },
+    "stop": { "type": "number" },
+    "t1": { "type": "number" },
+    "t2": { "type": "number" },
+    "stretch": { "type": "number" },
+    "suggested_size": { "type": "integer" },
+    "risk_pct": { "type": "number" },
+    "pump_prone": { "type": "boolean" },
+    "delayed_data": { "type": "integer" },
+    "latency_minutes": { "type": "integer" },
+    "provider_used": { "type": "string" },
+    "coverage_note": { "type": "string" },
+    "rationale": { "type": "string" }
+  },
+  "required": ["date", "time_et", "ticker", "plan", "trigger"]
+}

@@ -1,0 +1,28 @@
+# Example scanner config (safe to commit)
+
+premarket:
+  start_time: "04:00"      # ET
+  end_time: "09:27"        # ET
+  cadence_minutes: 5
+
+scoring_weights:
+  gap_percent: 0.4
+  rvol: 0.3
+  atr_stretch: 0.2
+  catalyst: 0.1
+
+thresholds:
+  min_gap_percent: 3.0
+  min_rvol: 1.5
+  pump_gap_percent: 25.0
+  pump_rvol: 4.0
+  pump_atr: 1.8
+
+buffer:
+  breakout_buffer_pct: 0.003
+  pullback_fib_low: 0.38
+  pullback_fib_high: 0.62
+
+risk:
+  max_risk_pct: 0.5
+  daily_loss_cap_pct: 1.0

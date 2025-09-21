@@ -1,0 +1,28 @@
+# Premarket scanner config
+
+premarket:
+  start_time: "04:00"      # ET, earliest candles to scan
+  end_time: "09:27"        # ET, cutoff before open
+  cadence_minutes: 5       # how often scanner polls Polygon
+
+scoring_weights:
+  gap_percent: 0.4
+  rvol: 0.3
+  atr_stretch: 0.2
+  catalyst: 0.1
+
+thresholds:
+  min_gap_percent: 3.0     # ignore < 3% gappers
+  min_rvol: 1.5
+  pump_gap_percent: 25.0   # auto-flag pump prone
+  pump_rvol: 4.0
+  pump_atr: 1.8
+
+buffer:
+  breakout_buffer_pct: 0.003   # 0.3% above PM high
+  pullback_fib_low: 0.38
+  pullback_fib_high: 0.62
+
+risk:
+  max_risk_pct: 0.5        # max NAV risk per trade
+  daily_loss_cap_pct: 1.0  # stop trading for day

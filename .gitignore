@@ -11,6 +11,7 @@ __pycache__/
 # --- macOS / Editors ---
 .DS_Store
 .vscode/
+.idea/
 
 # --- Project Data (local only) ---
 data/
@@ -25,5 +26,6 @@ backtest/
 *.xlsx
 *.csv
 
-# --- Allow CSV templates in schemas (not actual data) ---
+# --- Allow templates in schemas/ ---
 !schemas/*.csv
+!schemas/*.json

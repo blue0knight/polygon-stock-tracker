@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Watchlist",
+  "type": "object",
+  "properties": {
+    "ticker": { "type": "string" },
+    "bucket": { "type": "string" },
+    "breakout_level": { "type": "number" },
+    "entry_low": { "type": "number" },
+    "entry_high": { "type": "number" },
+    "stop_hint": { "type": "number" },
+    "target1_hint": { "type": "number" },
+    "target2_hint": { "type": "number" },
+    "notes": { "type": "string" },
+    "delayed_data": { "type": "integer" },
+    "latency_minutes": { "type": "integer" },
+    "provider_used": { "type": "string" },
+    "coverage_note": { "type": "string" },
+    "plan_type": { "type": "string", "enum": ["BREAKOUT", "PULLBACK"] },
+    "entry_trigger": { "type": "number" },
+    "risk_mode": { "type": "string", "enum": ["normal", "pump_prone"] },
+    "pump_prone": { "type": "boolean" }
+  },
+  "required": ["ticker", "plan_type", "entry_trigger"]
+}
