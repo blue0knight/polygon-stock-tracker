@@ -11,27 +11,25 @@ def calculate_gap(prev_close: float, last_price: float) -> float:
 
 
 def score_snapshots(snapshots: Dict[str, Dict]) -> List[Tuple[str, float]]:
-    """
-    Given snapshot data keyed by ticker, calculate gap % for each.
-    snapshots format:
-      {
-        "AAPL": {"prevClose": 220.5, "lastTrade": 225.1},
-        "TSLA": {"prevClose": 270.2, "lastTrade": 263.9},
-        ...
-      }
-    Returns a list of (ticker, gap%) sorted by gap % desc.
-    """
     scored = []
     for ticker, data in snapshots.items():
-        prev = data.get("prevClose")
-        last = data.get("lastTrade")
-        if prev is None or last is None:
+        # Handle both camelCase and snake_case keys
+        prev = data.get("prevClose") or data.get("prev_close")
+        last = data.get("lastTrade") or data.get("last_price")
+
+        # Fallback: use Polygon's todays_change_pct if last is missing
+        if last is None and "todays_change_pct" in data and prev:
+            gap = data["todays_change_pct"]
+        elif prev is None or last is None:
             continue
-        gap = calculate_gap(prev, last)
+        else:
+            gap = ((last - prev) / prev) * 100
+
         scored.append((ticker, gap))
 
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
+
 
 
 def top_movers(scored: List[Tuple[str, float]], n: int = 5) -> List[Tuple[str, float]]:

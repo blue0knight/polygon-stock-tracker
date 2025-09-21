@@ -93,6 +93,7 @@ if __name__ == "__main__":
         snapshots = fetch_snapshots(limit=50)
 
         if snapshots:
+            print("Sample snapshot:", snapshots[0]) # debug
             logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
             snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
             scored = score_snapshots(snap_dict)

@@ -1,3 +1,9 @@
+## [0.2.4] – 2025-09-21
+### Fixed
+- `score_snapshots()` now supports Polygon’s `prev_close` / `last_price` fields and falls back to `todays_change_pct`.
+- Top-5 movers now correctly scored and written into `output/watchlist.csv`.
+
+
 ## [0.2.3] – 2025-09-21
 ### Added
 - `src/core/output.py`: helper to write Top-5 movers into `output/watchlist.csv` with schema headers.
