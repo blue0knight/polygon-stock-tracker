@@ -1,8 +1,19 @@
-## [0.1.3] – 2025-09-21
+## [0.2.2] – 2025-09-21
 ### Added
-- Added `schemas/watchlist_template.csv` and `schemas/missed_template.csv` with clean headers and working Excel/Sheets formulas.
-  - `watchlist_template.csv`: auto-calculates `total_cost`, P/L $, and P/L %; falls back to T1 target if no exit price.
-  - `missed_template.csv`: auto-calculates `total_cost`, P/L $, and P/L %; falls back to exit_target if no close price.
+- `src/core/scoring.py`: Scoring module with gap % calculation, Top-5 ranking, and logging helpers.
+- `tests/test_scoring.py`: Unit tests validating gap %, ranking, and edge cases.
+
+### Changed
+- Integrated scoring into `src/scanner/scanner.py` (`--once` dry-run and loop mode now log Top-5 movers).
+
+## [0.2.1] – 2025-09-21
+### Added
+- `src/adapters/polygon_adapter.py`: Polygon API adapter for snapshot fetching.
+- `src/scanner/scanner.py`: added `--once` dry-run mode to fetch all tickers (~11,700) and log results.
+- `scripts/test_fetch.py`: standalone script to validate Polygon connectivity.
+
+### Changed
+- Minor logging improvements in scanner for dry-run mode.
 
 ## [0.2.0] – 2025-09-21
 ### Added
@@ -15,11 +26,12 @@
   - `pump_prone` block (earliest_entry, time_stop).
   - `targets` block (T1, T2, stretch levels).
 
-## [0.2.1] – 2025-09-21
+## [0.1.3] – 2025-09-21
 ### Added
-- `src/adapters/polygon_adapter.py`: Polygon API adapter for snapshot fetching.
-- `src/scanner/scanner.py`: added `--once` dry-run mode to fetch all tickers (~11,700) and log results.
-- `scripts/test_fetch.py`: standalone script to validate Polygon connectivity.
+- Added `schemas/watchlist_template.csv` and `schemas/missed_template.csv` with clean headers and working Excel/Sheets formulas.
+  - `watchlist_template.csv`: auto-calculates `total_cost`, P/L $, and P/L %; falls back to T1 target if no exit price.
+  - `missed_template.csv`: auto-calculates `total_cost`, P/L $, and P/L %; falls back to exit_target if no close price.
 
-### Changed
-- Minor logging improvements in scanner for dry-run mode.
+
+
+
