@@ -1,3 +1,17 @@
+## [0.4.0] – 2025-09-23
+### Added
+- **Postmarket scanning** support (16:00–20:00 ET) alongside premarket.
+- Session log tagging with `[PRE]` and `[POST]` for clarity in `scanner.log`.
+- New `src/core/filters.py` module with basic `is_tradeable()` logic.
+
+### Changed
+- Adjusted premarket cutoff to **09:50 ET** to account for Polygon’s ~15 min data delay.
+- `log_top_movers()` now logs **ticker, price, % move, and actual Polygon timestamp**.
+- `scanner.py` refactored to use a reusable `run_session()` for both sessions.
+
+### Fixed
+- Resolved missing imports and improved resilience of logging pipeline.
+
 ## [0.3.0] – 2025-09-21
 ### Added
 - Introduced `src/core/journal.py` for recording trades into `journal.csv`.
