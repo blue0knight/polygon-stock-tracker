@@ -1,108 +1,66 @@
-# --- Imports ---
-import os
-import sys
-import time
-import yaml
 import logging
 from datetime import datetime
 import pytz
 
-from src.adapters.polygon_adapter import fetch_snapshots
-from src.core.scoring import score_snapshots, log_top_movers
-from src.core.output import write_watchlist
 
-
-# --- Load config ---
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/scanner.yaml")
-
-def load_config(path=CONFIG_PATH):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-# --- Logging setup ---
-def setup_logger(log_path):
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    logging.basicConfig(
-        filename=log_path,
-        filemode="a",
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        level=logging.INFO
-    )
-    return logging.getLogger("scanner")
-
-
-# --- Time helpers ---
-def within_premarket_window(cfg):
-    tz = pytz.timezone("America/New_York")
-    now = datetime.now(tz)
-
-    start = datetime.combine(
-        now.date(), datetime.strptime(cfg["premarket"]["start_time"], "%H:%M").time()
-    )
-    end = datetime.combine(
-        now.date(), datetime.strptime(cfg["premarket"]["end_time"], "%H:%M").time()
-    )
-
-    start = tz.localize(start)
-    end = tz.localize(end)
-
-    return start <= now <= end
-
-
-# --- Main loop ---
-# --- Main loop ---
-def run():
-    cfg = load_config()
-    logger = setup_logger(cfg["output"]["log"])
-
-    cadence = int(cfg["premarket"]["cadence_minutes"])
-    logger.info("Starting premarket scanner loop...")
-
-    while within_premarket_window(cfg):
+def score_snapshots(snapshots: dict):
+    """
+    Takes a dict of snapshots {ticker: snapshot} and returns
+    a list of (ticker, pct_gain) sorted by % move (desc).
+    """
+    scored = []
+    for ticker, snap in snapshots.items():
         try:
-            snapshots = fetch_snapshots(limit=50)
+            last = snap.get("last_price") or 0
+            prev = snap.get("prev_close") or 0
+            if prev > 0:
+                pct_gain = ((last - prev) / prev) * 100
+                scored.append((ticker, pct_gain))
+        except Exception:
+            continue
 
-            if snapshots:
-                logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
-                snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
-                scored = score_snapshots(snap_dict)
-                log_top_movers(scored, n=5)
+    # Sort by % move descending
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
 
-                top5 = scored[:5]
-                write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
+
+def log_top_movers(scored, snapshots, n=5):
+    """
+    Logs the top n movers with price, % move, and timestamp.
+    scored: [(ticker, pct_gain), ...] sorted desc
+    snapshots: dict[ticker] = snapshot (with last_price/prev_close/timestamp)
+    """
+    logger = logging.getLogger("scanner")
+    top = scored[:n]
+    if not top:
+        logger.warning("No movers available to log.")
+        return
+
+    logger.info(f"Top {n} movers:")
+    for ticker, gain in top:
+        snap = snapshots.get(ticker, {})
+        price = snap.get("last_price") or snap.get("prev_close")
+        ts = snap.get("timestamp") or snap.get("last_updated")
+
+        # Convert timestamp if epoch ms → human-readable ET
+        ts_str = None
+        if ts:
+            try:
+                if isinstance(ts, (int, float)):
+                    ts_dt = datetime.fromtimestamp(ts / 1000, tz=pytz.timezone("America/New_York"))
+                    ts_str = ts_dt.strftime("%H:%M:%S")
+                else:
+                    ts_str = str(ts)
+            except Exception:
+                ts_str = str(ts)
+
+        if price:
+            if ts_str:
+                logger.info(f"  {ticker}: ${price:.2f} ({gain:.2f}%) @ {ts_str} ET")
             else:
-                logger.warning("No snapshots returned this cycle")
-
-            # TODO: Add RVOL, ATR stretch
-            # TODO: Validate schema
-
-        except Exception as e:
-            logger.error(f"❌ Error during scan tick: {e}", exc_info=True)
-
-        time.sleep(cadence * 60)
-
-    logger.info("Premarket window closed. Scanner stopped.")
-
-
-# --- Entrypoint ---
-if __name__ == "__main__":
-    if "--once" in sys.argv:
-        cfg = load_config()
-        logger = setup_logger(cfg["output"]["log"])
-        snapshots = fetch_snapshots(limit=50)
-
-        if snapshots:
-            print("Sample snapshot:", snapshots[0]) # debug
-            logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
-            snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
-            scored = score_snapshots(snap_dict)
-            log_top_movers(scored, n=5)
-
-            top5 = scored[:5]
-            write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
+                logger.info(f"  {ticker}: ${price:.2f} ({gain:.2f}%)")
         else:
-            logger.warning("No snapshots returned")
-    else:
-        run()
-
+            if ts_str:
+                logger.info(f"  {ticker}: ({gain:.2f}%) @ {ts_str} ET [no price]")
+            else:
+                logger.info(f"  {ticker}: ({gain:.2f}%) [no price]")
