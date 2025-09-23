@@ -2,9 +2,14 @@
 
 premarket:
   start_time: "04:00"      # ET, earliest candles to scan
-  end_time: "09:27"        # ET, cutoff before open
-  cadence_minutes: 5       # how often scanner polls Polygon
+  end_time: "09:50"        # ET, accounts for 15 min delay at open
+  cadence_minutes: 5       # keep 5 min polling
 
+postmarket:
+  start_time: "16:00"      # ET, after regular market close
+  end_time: "20:00"        # ET, last extended hours window
+  cadence_minutes: 5       # same as premarket
+  
 scoring_weights:
   gap_percent: 0.4
   rvol: 0.3
