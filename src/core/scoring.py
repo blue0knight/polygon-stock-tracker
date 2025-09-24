@@ -3,11 +3,8 @@ import logging
 from datetime import datetime
 import pytz
 
+
 def score_snapshots(snapshots: dict):
-    """
-    Takes a dict of snapshots {ticker: snapshot} and returns
-    a list of (ticker, pct_gain) sorted by % move (desc).
-    """
     scored = []
     for ticker, snap in snapshots.items():
         try:
@@ -26,7 +23,7 @@ def score_snapshots(snapshots: dict):
 def log_top_movers(scored, snapshots, n=5, tag=""):
     """
     Logs the top n movers with price, % move, and timestamp.
-    Adds session tag ([PRE], [POST], [ONCE]).
+    Keeps [PRE]/[POST] tag in logs.
     """
     logger = logging.getLogger("scanner")
     top = scored[:n]
@@ -40,7 +37,14 @@ def log_top_movers(scored, snapshots, n=5, tag=""):
     for ticker, gain in top:
         snap = snapshots.get(ticker, {})
         price = snap.get("last_price") or snap.get("prev_close")
-        ts = snap.get("timestamp") or snap.get("updated")
+
+        # ✅ prefer minute_ts (Polygon bar timestamp), fallback to others
+        ts = (
+            snap.get("minute_ts")
+            or snap.get("timestamp")
+            or snap.get("updated")
+            or snap.get("last_updated")
+        )
 
         ts_str = None
         if ts:
