@@ -6,11 +6,23 @@ import yaml
 import logging
 from datetime import datetime
 import pytz
+from dotenv import load_dotenv
+
+# --- Load environment explicitly ---
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+load_dotenv(dotenv_path=ENV_PATH)
+
+if not os.getenv("POLYGON_API_KEY"):
+    raise RuntimeError(f"❌ POLYGON_API_KEY not loaded. Expected in {ENV_PATH}")
+
 
 from src.adapters.polygon_adapter import fetch_snapshots
 from src.core.scoring import score_snapshots, log_top_movers
 from src.core.output import write_watchlist
 
+# --- Load environment ---
+load_dotenv()  # loads .env at project root
 
 # --- Load config ---
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/scanner.yaml")
@@ -50,7 +62,6 @@ def within_premarket_window(cfg):
     return start <= now <= end
 
 
-# --- Main loop ---
 # --- Main loop ---
 def run():
     cfg = load_config()
