@@ -1,3 +1,7 @@
+## [0.3.1] – 2025-09-25
+### Fixed
+- Added `.env` loading in `scanner.py`
+
 ## [0.3.0] – 2025-09-21
 ### Added
 - Introduced `src/core/journal.py` for recording trades into `journal.csv`.
