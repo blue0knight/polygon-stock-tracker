@@ -21,8 +21,6 @@ from src.adapters.polygon_adapter import fetch_snapshots
 from src.core.scoring import score_snapshots, log_top_movers
 from src.core.output import write_watchlist
 
-# --- Load environment ---
-load_dotenv()  # loads .env at project root
 
 # --- Load config ---
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/scanner.yaml")
@@ -62,6 +60,12 @@ def within_premarket_window(cfg):
     return start <= now <= end
 
 
+def is_final_pick_time():
+    tz = pytz.timezone("America/New_York")
+    now = datetime.now(tz)
+    return now.strftime("%H:%M") == "09:50"
+
+
 # --- Main loop ---
 def run():
     cfg = load_config()
@@ -80,13 +84,18 @@ def run():
                 scored = score_snapshots(snap_dict)
                 log_top_movers(scored, n=5)
 
+                # --- Final Pick (auto at 09:50) ---
+                if is_final_pick_time() and scored:
+                    best = scored[0]
+                    ticker = best.get("ticker", "N/A")
+                    price = best.get("last_price") or best.get("prev_close") or 0
+                    gap = round(best.get("gap_pct", 0.0), 2)
+                    logger.info(f"[PRE] 📌 Final Pick of the Day (09:50 ET): {ticker} (${price}, {gap}%)")
+
                 top5 = scored[:5]
                 write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
             else:
                 logger.warning("No snapshots returned this cycle")
-
-            # TODO: Add RVOL, ATR stretch
-            # TODO: Validate schema
 
         except Exception as e:
             logger.error(f"❌ Error during scan tick: {e}", exc_info=True)
@@ -104,11 +113,20 @@ if __name__ == "__main__":
         snapshots = fetch_snapshots(limit=50)
 
         if snapshots:
-            print("Sample snapshot:", snapshots[0]) # debug
+            print("Sample snapshot:", snapshots[0])  # console debug
             logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
             snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
             scored = score_snapshots(snap_dict)
             log_top_movers(scored, n=5)
+
+            # --- Final Pick (manual trigger or at 09:50) ---
+            force_final_pick = "--final-pick-now" in sys.argv
+            if (force_final_pick or is_final_pick_time()) and scored:
+                best = scored[0]
+                ticker = best.get("ticker", "N/A")
+                price = best.get("last_price") or best.get("prev_close") or 0
+                gap = round(best.get("gap_pct", 0.0), 2)
+                logger.info(f"[PRE] 📌 Final Pick of the Day (09:50 ET): {ticker} (${price}, {gap}%)")
 
             top5 = scored[:5]
             write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
@@ -116,4 +134,3 @@ if __name__ == "__main__":
             logger.warning("No snapshots returned")
     else:
         run()
-
