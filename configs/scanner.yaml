@@ -2,9 +2,14 @@
 
 premarket:
   start_time: "04:00"      # ET, earliest candles to scan
-  end_time: "09:27"        # ET, cutoff before open
-  cadence_minutes: 5       # how often scanner polls Polygon
+  end_time: "09:50"        # ET, accounts for 15 min delay at open
+  cadence_minutes: 5       # keep 5 min polling
 
+postmarket:
+  start_time: "16:00"      # ET, after regular market close
+  end_time: "20:00"        # ET, last extended hours window
+  cadence_minutes: 5       # same as premarket
+  
 scoring_weights:
   gap_percent: 0.4
   rvol: 0.3
@@ -50,3 +55,10 @@ scoring_weights:
   atr_threshold: 2.0   # optional, default=2.0
 
 min_liquidity: 100000  # 👈 new, safeguard for volume filters
+
+liquidity:
+  min_intraday_shares: 100000      # real-time shares traded today
+  min_avg_daily_volume: 500000     # 30/60D avg, whatever your adapter returns
+  min_dollar_volume: 300000        # last_price * intraday_volume
+  min_price: 1.0                   # skip sub-1 tickers
+  require_prices: true             # drop if last/prev_close are missing/zero

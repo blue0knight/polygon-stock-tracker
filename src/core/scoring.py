@@ -8,9 +8,14 @@ from typing import Dict, List, Iterable, Optional
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 import math
+import logging
+import pytz
 
 NY = ZoneInfo("America/New_York")
 
+## -------------------------------------------------------------------
+## Candidate Model
+## -------------------------------------------------------------------
 @dataclass
 class Candidate:
     date: str                 # "YYYY-MM-DD"
@@ -28,6 +33,9 @@ class Candidate:
     rvol: Optional[float] = None
     atr_stretch: Optional[float] = None
 
+## -------------------------------------------------------------------
+## Time / Helper Functions
+## -------------------------------------------------------------------
 def is_after_935_et(now: Optional[datetime] = None) -> bool:
     """Return True iff current ET time is >= 09:35:00."""
     now = now or datetime.now(tz=NY)
@@ -51,6 +59,9 @@ def compute_atr_stretch(current_price: float, prev_close: float, atr_value: floa
         return 0.0
     return (current_price - prev_close) / atr_value
 
+## -------------------------------------------------------------------
+## Filters + Scoring
+## -------------------------------------------------------------------
 def passes_filters(c: Candidate, min_liquidity: int) -> bool:
     """Final-pick pre-filters: time, above PMH, liquidity."""
     if not is_after_935_et():
@@ -62,18 +73,14 @@ def passes_filters(c: Candidate, min_liquidity: int) -> bool:
     return True
 
 def score_gap(gap_pct: float) -> float:
-    # Cap at 100 to avoid 200% junk from dominating
     return max(0.0, min(gap_pct, 100.0))
 
 def score_rvol(rvol: float) -> float:
-    # Cap at 5x, scale so 5x == 50 points
-    return min(max(rvol, 0.0), 5.0) * 10.0
+    return min(max(rvol, 0.0), 5.0) * 10.0  # Cap at 5x, scale so 5x == 50
 
 def score_atr_stretch(stretch: float, threshold: float = 2.0) -> float:
-    # If >= threshold (e.g., 2 ATR), return 0. Else a decreasing curve.
     if stretch >= threshold:
         return 0.0
-    # normalize: stretch==0 => 100; stretch==threshold => 0
     return max(0.0, 1.0 - (stretch / threshold)) * 100.0
 
 def score_catalyst(has_catalyst: bool) -> float:
@@ -99,23 +106,22 @@ def calculate_final_score(
         catalyst_score * weights.get("catalyst", 0.1)
     )
 
+## -------------------------------------------------------------------
+## Final Pick Selection
+## -------------------------------------------------------------------
 def select_final_pick(
     candidates: Iterable[Candidate],
     *,
     weights: Dict[str, float],
     min_liquidity: int,
 ) -> Optional[Dict[str, object]]:
-    """
-    Applies filters + scoring and returns a dict representing the winning row for CSV.
-    Returns None if no valid candidate.
-    """
+    """Applies filters + scoring and returns a dict representing the winning row for CSV."""
     scored: List[Dict[str, object]] = []
 
     for c in candidates:
         if not passes_filters(c, min_liquidity=min_liquidity):
             continue
 
-        # Derive metrics if not pre-populated
         gap_pct = c.gap_pct if c.gap_pct is not None else compute_gap_pct(c.prev_close, c.last_price)
         rvol = c.rvol if c.rvol is not None else compute_rvol(c.intraday_volume, c.avg_daily_volume)
         atr_stretch = c.atr_stretch if c.atr_stretch is not None else compute_atr_stretch(c.last_price, c.prev_close, c.atr_14)
@@ -154,10 +160,12 @@ def select_final_pick(
     if not scored:
         return None
 
-    # Highest final score wins
     scored.sort(key=lambda r: r["FinalScore"], reverse=True)
     return scored[0]
 
+## -------------------------------------------------------------------
+## Snapshot Scoring + Logging
+## -------------------------------------------------------------------
 def score_snapshots(snap_dict: Dict[str, Dict]) -> List[Dict]:
     """Very simple scoring passthrough for compatibility with scanner."""
     rows = []
@@ -169,11 +177,52 @@ def score_snapshots(snap_dict: Dict[str, Dict]) -> List[Dict]:
             "gap_pct": compute_gap_pct(snap.get("prev_close", 0) or 0, snap.get("last_price", 0) or 0),
             "volume": snap.get("volume", 0),
         })
-    # Sort descending by gap_pct
     return sorted(rows, key=lambda r: r["gap_pct"], reverse=True)
 
-def log_top_movers(rows: List[Dict], n: int = 5):
-    """Log top N movers for debug/visibility."""
-    print(f"Top {n} movers:")
-    for r in rows[:n]:
-        print(f"  {r['ticker']}: {r['gap_pct']:.2f}% gap, vol {r['volume']}")
+def log_top_movers(scored, snapshots=None, n=5, tag=""):
+    """
+    Logs the top n movers with price, % move, and timestamp.
+    Adds session tag ([PRE], [POST], [ONCE]).
+    """
+    logger = logging.getLogger("scanner")
+    top = scored[:n]
+    if not top:
+        logger.warning(f"{tag} No movers available to log.")
+        return
+
+    logger.info(f"{tag} Top {n} movers by gap %:")
+    tz = pytz.timezone("America/New_York")
+
+    for row in top:
+        if isinstance(row, tuple):
+            # origin/main format: (ticker, gain)
+            ticker, gain = row
+            snap = snapshots.get(ticker, {}) if snapshots else {}
+            price = snap.get("last_price") or snap.get("prev_close")
+            ts = snap.get("timestamp") or snap.get("updated")
+        else:
+            # HEAD format: dict row
+            ticker = row["ticker"]
+            gain = row["gap_pct"]
+            price = row.get("last_price") or row.get("prev_close")
+            ts = None
+
+        ts_str = None
+        if ts:
+            try:
+                if isinstance(ts, (int, float)):  # epoch ms
+                    ts_dt = datetime.fromtimestamp(ts / 1000, tz=tz)
+                    ts_str = ts_dt.strftime("%H:%M:%S")
+                else:
+                    ts_str = str(ts)
+            except Exception:
+                ts_str = str(ts)
+
+        if price and ts_str:
+            logger.info(f"{tag}   {ticker}: ${price:.2f} ({gain:.2f}%) @ {ts_str} ET")
+        elif price:
+            logger.info(f"{tag}   {ticker}: ${price:.2f} ({gain:.2f}%)")
+        elif ts_str:
+            logger.info(f"{tag}   {ticker}: ({gain:.2f}%) @ {ts_str} ET [no price]")
+        else:
+            logger.info(f"{tag}   {ticker}: ({gain:.2f}%) [no price]")
