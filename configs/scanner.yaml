@@ -41,3 +41,12 @@ targets:
   t1: 0.10
   t2: 0.18
   stretch: 0.22
+
+scoring_weights:
+  gap_percent: 0.4
+  rvol: 0.3
+  atr_stretch: 0.2
+  catalyst: 0.1
+  atr_threshold: 2.0   # optional, default=2.0
+
+min_liquidity: 100000  # 👈 new, safeguard for volume filters

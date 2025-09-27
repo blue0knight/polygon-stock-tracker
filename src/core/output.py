@@ -1,8 +1,19 @@
-import csv
-from datetime import datetime
-import os
-from typing import Any, Dict, Iterable, Optional, Tuple
+from __future__ import annotations   # <-- must be first
 
+## -------------------------------------------------------------------
+## Imports
+## -------------------------------------------------------------------
+import csv
+import os
+from datetime import datetime
+from typing import Any, Dict, Iterable, Optional, Tuple
+from pathlib import Path
+
+## -------------------------------------------------------------------
+## Utility: Normalize Mover Input
+##  - Converts different shapes (dict, tuple, list) into a standard dict
+##  - Standard form: {"ticker": str, "gap_pct": float, "volume": int}
+## -------------------------------------------------------------------
 def _normalize_mover(m: Any) -> Optional[Dict[str, Any]]:
     """
     Accepts a mover in several shapes and normalizes to:
@@ -43,7 +54,9 @@ def _normalize_mover(m: Any) -> Optional[Dict[str, Any]]:
     # Unknown shape
     return None
 
-
+## -------------------------------------------------------------------
+## Watchlist Writer (Top-5 movers → output/watchlist.csv)
+## -------------------------------------------------------------------
 def write_watchlist(path: str, movers: Iterable[Any], targets=None) -> None:
     """
     Writes Top-5 movers to CSV with schema:
@@ -102,3 +115,36 @@ def write_watchlist(path: str, movers: Iterable[Any], targets=None) -> None:
         if not has_header:
             writer.writeheader()
         writer.writerows(rows)
+
+## -------------------------------------------------------------------
+## Final Pick CSV Writer (append to src/core/output.py)
+## -------------------------------------------------------------------
+
+FINAL_PICK_HEADERS = [
+    "Date",
+    "Ticker",
+    "PremarketHigh",
+    "OpenPrice",
+    "PickPrice",
+    "GapPct",
+    "RVOL",
+    "ATRStretch",
+    "Catalyst",
+    "FinalScore",
+    "Reason",
+]
+
+def write_final_pick(row: Dict[str, object], path: str = "output/final_pick.csv") -> None:
+    """
+    Appends one row (dict) to output/final_pick.csv, creating it with headers if missing.
+    """
+    outfile = Path(path)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+
+    file_exists = outfile.exists()
+    with outfile.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=FINAL_PICK_HEADERS)
+        if not file_exists:
+            writer.writeheader()
+        sanitized = {k: row.get(k, "") for k in FINAL_PICK_HEADERS}
+        writer.writerow(sanitized)
