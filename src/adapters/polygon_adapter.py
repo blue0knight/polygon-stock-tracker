@@ -33,16 +33,6 @@ def fetch_snapshots(limit=50):
     if resp.status_code != 200:
         raise RuntimeError(f"❌ Polygon API error {resp.status_code}: {resp.text}")
 
-=======
-
-def fetch_snapshots(limit=50):
-    if not POLYGON_API_KEY:
-        raise RuntimeError("❌ No POLYGON_API_KEY found in environment or .env file")
-
-    url = f"{BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers"
-    resp = requests.get(url, params={"apiKey": POLYGON_API_KEY})
-    resp.raise_for_status()
->>>>>>> origin/main
     data = resp.json()
 
     results = []

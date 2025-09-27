@@ -1,3 +1,30 @@
+## [dev/final-pick] - 2025-09-27
+### Added
+- Liquidity filters (configurable via `scanner.yaml`):
+  - min_intraday_shares
+  - min_avg_daily_volume
+  - min_dollar_volume
+  - min_price
+  - require_prices
+- Current Pick logging:
+  - Logs the current strongest candidate each cycle (dry-run mode).
+  - Distinguishes from Final Pick at 09:50 ET.
+- Simulation override (prep work) for running past dates.
+
+### Fixed
+- Enrichment pipeline now correctly processes snapshot lists (no more string index errors).
+- Guarded scoring + watchlist writing (no more `NameError: scored not defined`).
+- Consistent flow in both main loop and `--once` path: snapshots → enrich → filter → score.
+- Liquidity config now loads correctly from YAML (no fallback to min_price=50).
+
+### QA / Protocol
+- Validated scanner runs with liquidity filter + logging without crashes.
+- Weekend runs drop all tickers (expected due to no live data).
+- Monday premarket runbook documented and ready.
+
+---
+
+
 ## [0.3.1] – 2025-09-25
 ### Fixed
 - Added `.env` loading in `scanner.py`

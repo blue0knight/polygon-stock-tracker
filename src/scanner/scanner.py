@@ -154,16 +154,19 @@ def enrich_rows(rows, trade_date: str):
         })
     return enriched
 
-def _get_liq_cfg(cfg):
-    """Backwards-compatible loader: prefers cfg['liquidity'], falls back to top-level min_liquidity."""
-    liq = (cfg or {}).get("liquidity", {}) or {}
-    return {
-        "min_intraday_shares": int(liq.get("min_intraday_shares", cfg.get("min_liquidity", 100_000))),
-        "min_avg_daily_volume": int(liq.get("min_avg_daily_volume", 0)),
-        "min_dollar_volume": float(liq.get("min_dollar_volume", 0)),
-        "min_price": float(liq.get("min_price", 0)),
-        "require_prices": bool(liq.get("require_prices", True)),
+def _get_liq_cfg(cfg, logger=None):
+    liq_cfg = {
+        "min_intraday_shares": cfg.get("liquidity", {}).get("min_intraday_shares", 50),
+        "min_avg_daily_volume": cfg.get("liquidity", {}).get("min_avg_daily_volume", 50),
+        "min_dollar_volume": cfg.get("liquidity", {}).get("min_dollar_volume", 500),
+        "min_price": cfg.get("liquidity", {}).get("min_price", 0.1),
+        "require_prices": cfg.get("liquidity", {}).get("require_prices", False),
     }
+
+    if logger:
+        logger.info(f"Liquidity config loaded: {liq_cfg}")
+
+    return liq_cfg
 
 def _dollar_volume(row):
     last = row.get("last_price") or row.get("last")
@@ -263,35 +266,39 @@ def run():
             if snapshots:
                 logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
                 snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
-                scored = score_snapshots(snap_dict)
-                log_top_movers(scored, n=5)
 
-                # --- Enrich rows for liquidity & final pick ---
+                # --- Enrich rows before scoring ---
                 today = datetime.now().strftime("%Y-%m-%d")
-                enriched = enrich_rows(scored, today)
+                enriched = enrich_rows(snap_dict, today)
 
-                ## -------------------------------------------------------------------
-                ## Liquidity Filter Application (Loop)
-                ## -------------------------------------------------------------------
-                liq_cfg = _get_liq_cfg(cfg)
+                # --- Apply Liquidity Filters ---
+                liq_cfg = _get_liq_cfg(cfg, logger=logger)
                 filtered = apply_liquidity_filters(enriched, liq_cfg, logger=logger)
+                logger.info(f"Liquidity filter kept {len(filtered)}/{len(enriched)} rows")
 
-                # --- Final Pick (auto at 09:50) ---
-                if is_final_pick_time() and filtered:
-                    winner = finalize_pick_from_rows(
-                        filtered,
-                        cfg["scoring_weights"],
-                        liq_cfg["min_intraday_shares"],  # backward-compatible param
-                    )
-                    if winner:
-                        logger.info(
-                            f"[PRE] 📌 Final Pick of the Day (09:50 ET): "
-                            f"{winner['Ticker']} (${winner['PickPrice']}, {winner['GapPct']}%)"
+                # --- Score after filtering ---
+                if filtered:
+                    scored = score_snapshots(filtered, cfg["scoring_weights"])
+                    log_top_movers(scored, n=5)
+
+                    # --- Final Pick (auto at 09:50) ---
+                    if is_final_pick_time():
+                        winner = finalize_pick_from_rows(
+                            scored,
+                            cfg["scoring_weights"],
+                            liq_cfg["min_intraday_shares"],  # backward-compatible param
                         )
+                        if winner:
+                            logger.info(
+                                f"[PRE] 📌 Final Pick of the Day (09:50 ET): "
+                                f"{winner['Ticker']} (${winner['PickPrice']}, {winner['GapPct']}%)"
+                            )
 
-                # --- Write watchlist (top 5 scored for visibility) ---
-                top5 = scored[:5]
-                write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
+                    # --- Write watchlist (top 5 scored for visibility) ---
+                    top5 = scored[:5]
+                    write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
+                else:
+                    logger.warning("No tickers passed liquidity filters — skipping scoring/final pick.")
             else:
                 logger.warning("No snapshots returned this cycle")
 
@@ -302,40 +309,40 @@ def run():
 
     logger.info("Premarket window closed. Scanner stopped.")
 
+
 ## -------------------------------------------------------------------
 ## Entrypoint
 ##  - Supports one-off run (--once) with optional --final-pick-now
 ##  - Otherwise runs continuous premarket loop
 ##  - Applies enrichment + liquidity filters before final pick
 ## -------------------------------------------------------------------
-if __name__ == "__main__":
-    if "--once" in sys.argv:
-        cfg = load_config()
-        logger = setup_logger(cfg["output"]["log"])
-        snapshots = fetch_snapshots(limit=50)
+if "--once" in sys.argv:
+    cfg = load_config()
+    logger = setup_logger(cfg["output"]["log"])
+    snapshots = fetch_snapshots(limit=50)
 
-        if snapshots:
-            print("Sample snapshot:", snapshots[0])  # console debug
-            logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
-            snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
-            scored = score_snapshots(snap_dict)
+    if snapshots:
+        print("Sample snapshot:", snapshots[0])  # console debug
+        logger.info(
+            f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}"
+        )
+
+        # --- Enrich + Liquidity ---
+        today = datetime.now().strftime("%Y-%m-%d")
+        enriched = enrich_rows(snapshots, today)
+
+        liq_cfg = _get_liq_cfg(cfg, logger=logger)
+        filtered = apply_liquidity_filters(enriched, liq_cfg, logger=logger)
+
+        if filtered:
+            scored = score_snapshots(filtered, cfg["scoring_weights"])
             log_top_movers(scored, n=5)
-
-            # --- Enrich rows for final pick ---
-            today = datetime.now().strftime("%Y-%m-%d")
-            enriched = enrich_rows(scored, today)
-
-            ## -------------------------------------------------------------------
-            ## Liquidity Filter Application (Entrypoint)
-            ## -------------------------------------------------------------------
-            liq_cfg = _get_liq_cfg(cfg)
-            filtered = apply_liquidity_filters(enriched, liq_cfg, logger=logger)
 
             # --- Final Pick (manual trigger or at 09:50) ---
             force_final_pick = "--final-pick-now" in sys.argv
-            if (force_final_pick or is_final_pick_time()) and filtered:
+            if (force_final_pick or is_final_pick_time()):
                 winner = finalize_pick_from_rows(
-                    filtered,
+                    scored,
                     cfg["scoring_weights"],
                     liq_cfg["min_intraday_shares"],  # backward-compatible param
                 )
@@ -349,9 +356,11 @@ if __name__ == "__main__":
             top5 = scored[:5]
             write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
         else:
-            logger.warning("No snapshots returned")
+            logger.warning("No tickers passed liquidity filters — skipping scoring/final pick.")
     else:
-        run()
+        logger.warning("No snapshots returned")
+else:
+    run()
 
 
 

@@ -56,9 +56,20 @@ scoring_weights:
 
 min_liquidity: 100000  # 👈 new, safeguard for volume filters
 
+# liquidity:
+#   min_intraday_shares: 100000      # real-time shares traded today
+#   min_avg_daily_volume: 500000     # 30/60D avg, whatever your adapter returns
+#   min_dollar_volume: 300000        # last_price * intraday_volume
+#   min_price: 1.0                   # skip sub-1 tickers
+#   require_prices: true             # drop if last/prev_close are missing/zero
+
+# -------------------------------------------------------------------
+# Debug mode (loosened thresholds)
+# Uncomment this block and comment out the one above to test
+# -------------------------------------------------------------------
 liquidity:
-  min_intraday_shares: 100000      # real-time shares traded today
-  min_avg_daily_volume: 500000     # 30/60D avg, whatever your adapter returns
-  min_dollar_volume: 300000        # last_price * intraday_volume
-  min_price: 1.0                   # skip sub-1 tickers
-  require_prices: true             # drop if last/prev_close are missing/zero
+  min_intraday_shares: 50
+  min_avg_daily_volume: 50
+  min_dollar_volume: 500
+  min_price: 0.1
+  require_prices: false
