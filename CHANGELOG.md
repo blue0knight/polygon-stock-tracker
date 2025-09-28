@@ -1,16 +1,47 @@
-## [0.4.0] – 2025-09-23
+## [dev/final-pick] - 2025-09-27
 ### Added
-- **Postmarket scanning** support (16:00–20:00 ET) alongside premarket.
-- Session log tagging with `[PRE]` and `[POST]` for clarity in `scanner.log`.
-- New `src/core/filters.py` module with basic `is_tradeable()` logic.
+- `today_pick.csv` single-file schema with FinalPick flag and rationale.
+- New schema files: `schemas/today_pick.schema.json` and `schemas/today_pick_template.csv`.
+- ATR-14 calculation and enrichment in `polygon_adapter.py`.
+- Debug mode toggle in `scanner.yaml` (injects dummy ticker on weekends/testing).
+- Auto-seeding of CSV headers from template on scanner startup.
 
 ### Changed
-- Adjusted premarket cutoff to **09:50 ET** to account for Polygon’s ~15 min data delay.
-- `log_top_movers()` now logs **ticker, price, % move, and actual Polygon timestamp**.
-- `scanner.py` refactored to use a reusable `run_session()` for both sessions.
+- Updated `scanner.py` to enrich rows with ATR, gap %, RVOL, ATR stretch, rationale.
+- Centralized Final Pick row appending via `_final_pick_row()` and `append_row()`.
+- Liquidity filter logic clarified (drops logged by category).
+
+
+## [dev/final-pick] - 2025-09-27
+### Added
+- Liquidity filters (configurable via `scanner.yaml`):
+  - min_intraday_shares
+  - min_avg_daily_volume
+  - min_dollar_volume
+  - min_price
+  - require_prices
+- Current Pick logging:
+  - Logs the current strongest candidate each cycle (dry-run mode).
+  - Distinguishes from Final Pick at 09:50 ET.
+- Simulation override (prep work) for running past dates.
 
 ### Fixed
-- Resolved missing imports and improved resilience of logging pipeline.
+- Enrichment pipeline now correctly processes snapshot lists (no more string index errors).
+- Guarded scoring + watchlist writing (no more `NameError: scored not defined`).
+- Consistent flow in both main loop and `--once` path: snapshots → enrich → filter → score.
+- Liquidity config now loads correctly from YAML (no fallback to min_price=50).
+
+### QA / Protocol
+- Validated scanner runs with liquidity filter + logging without crashes.
+- Weekend runs drop all tickers (expected due to no live data).
+- Monday premarket runbook documented and ready.
+
+---
+
+
+## [0.3.1] – 2025-09-25
+### Fixed
+- Added `.env` loading in `scanner.py`
 
 ## [0.3.0] – 2025-09-21
 ### Added
