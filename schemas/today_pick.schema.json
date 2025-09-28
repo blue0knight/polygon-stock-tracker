@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Today Pick Schema",
+  "description": "Schema for the single-file today_pick.csv that tracks final picks and candidates",
+  "type": "object",
+  "properties": {
+    "date": {
+      "type": "string",
+      "description": "Trade date in YYYY-MM-DD format"
+    },
+    "time": {
+      "type": "string",
+      "description": "HH:MM ET when row recorded"
+    },
+    "ticker": {
+      "type": "string",
+      "description": "Stock ticker symbol"
+    },
+    "gap_pct": {
+      "type": "number",
+      "description": "Overnight gap percentage"
+    },
+    "rvol": {
+      "type": "number",
+      "description": "Relative volume vs average"
+    },
+    "atr_stretch": {
+      "type": "number",
+      "description": "Stretch relative to ATR(14)"
+    },
+    "premarket_high": {
+      "type": "number",
+      "description": "Premarket high before 09:30 ET"
+    },
+    "open_price": {
+      "type": "number",
+      "description": "Opening price at 09:30 ET"
+    },
+    "score": {
+      "type": "number",
+      "description": "Composite score from scoring_weights"
+    },
+    "final_pick": {
+      "type": "boolean",
+      "description": "TRUE if this ticker is the chosen Final Pick of the Day"
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Short note on why this ticker was chosen (e.g., Held above premarket high)"
+    }
+  },
+  "required": ["date", "ticker", "score", "final_pick"]
+}

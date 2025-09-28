@@ -1,366 +1,300 @@
-## -------------------------------------------------------------------
-## Imports
-## -------------------------------------------------------------------
+from __future__ import annotations
+
+# -------------------------------------------------------------------
+# Scanner (final)
+#  - Fetch → Enrich (incl. ATR) → Liquidity → Score → Final Pick
+#  - Single CSV: today_pick.csv with FinalPick flag + rationale
+#  - Debug mode via YAML (no code edits needed for weekends)
+# -------------------------------------------------------------------
+
 import os
 import sys
+import csv
 import time
 import yaml
+import shutil
 import logging
 import pytz
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from dotenv import load_dotenv
 
-from src.core.scoring import Candidate, select_final_pick, score_snapshots, log_top_movers
-from src.core.output import write_final_pick, write_watchlist
+# Core + adapters
+from src.core.scoring import score_snapshots, log_top_movers
+from src.core.output import write_watchlist
+from src.adapters import polygon_adapter as pa
 from src.adapters.polygon_adapter import fetch_snapshots
 
-## -------------------------------------------------------------------
-## Environment Setup
-##  - Loads .env for POLYGON_API_KEY
-## -------------------------------------------------------------------
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+# -------------------------------------------------------------------
+# Env / Config / Logger
+# -------------------------------------------------------------------
+ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = ROOT / ".env"
+CONFIG_PATH = ROOT / "configs" / "scanner.yaml"
+
 print(f"DEBUG: Expecting .env at {ENV_PATH}")
-
-load_dotenv(ENV_PATH)
-
-print(f"DEBUG: POLYGON_API_KEY after load_dotenv = {os.getenv('POLYGON_API_KEY')}")
-if not os.getenv("POLYGON_API_KEY"):
-    raise RuntimeError(f"❌ POLYGON_API_KEY not loaded. Expected in {ENV_PATH}")
-
-from dotenv import load_dotenv
-
-# Resolve project root (2 levels up from this file)
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(ENV_PATH)
 
 if not os.getenv("POLYGON_API_KEY"):
     raise RuntimeError(f"❌ POLYGON_API_KEY not loaded. Expected in {ENV_PATH}")
+print("DEBUG: POLYGON_API_KEY loaded ✓")
 
-## -------------------------------------------------------------------
-## Config Loader
-## -------------------------------------------------------------------
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/scanner.yaml")
-
-def load_config(path=CONFIG_PATH):
+def load_config(path: Path = CONFIG_PATH) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-## -------------------------------------------------------------------
-## Logger Setup
-## -------------------------------------------------------------------
-def setup_logger(log_path):
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+def setup_logger(log_path: str) -> logging.Logger:
+    log_file = Path(log_path)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
-        filename=log_path,
+        filename=str(log_file),
         filemode="a",
         format="%(asctime)s [%(levelname)s] %(message)s",
         level=logging.INFO
     )
     return logging.getLogger("scanner")
 
-## -------------------------------------------------------------------
-## Time Helpers
-## -------------------------------------------------------------------
-def within_premarket_window(cfg):
+
+# -------------------------------------------------------------------
+# Time helpers
+# -------------------------------------------------------------------
+def within_premarket_window(cfg: dict) -> bool:
     tz = pytz.timezone("America/New_York")
     now = datetime.now(tz)
-
     start = datetime.combine(
         now.date(), datetime.strptime(cfg["premarket"]["start_time"], "%H:%M").time()
     )
     end = datetime.combine(
         now.date(), datetime.strptime(cfg["premarket"]["end_time"], "%H:%M").time()
     )
+    return tz.localize(start) <= now <= tz.localize(end)
 
-    start = tz.localize(start)
-    end = tz.localize(end)
-
-    return start <= now <= end
-
-def is_final_pick_time():
+def is_final_pick_time() -> bool:
     tz = pytz.timezone("America/New_York")
-    now = datetime.now(tz)
-    return now.strftime("%H:%M") == "09:50"
+    return datetime.now(tz).strftime("%H:%M") == "09:50"
 
-## -------------------------------------------------------------------
-## Final Pick Utility
-##  - Converts rows into Candidate objects
-##  - Applies select_final_pick()
-##  - Writes result to output/final_pick.csv
-## -------------------------------------------------------------------
-def finalize_pick_from_rows(rows, weights, min_liquidity):
+
+# -------------------------------------------------------------------
+# CSV bootstrap / append
+# -------------------------------------------------------------------
+CSV_FIELDS = [
+    "date","time","ticker","gap_pct","rvol","atr_stretch",
+    "premarket_high","open_price","score","final_pick","rationale",
+]
+
+def ensure_today_pick_ready(cfg: dict, reset: bool = True) -> Path:
+    """Reset output/today_pick.csv from schemas/today_pick_template.csv (keeps headers correct)."""
+    out_path = Path(cfg["output"].get("today_pick", "output/today_pick.csv"))
+    tpl_path = ROOT / "schemas" / "today_pick_template.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if reset or not out_path.exists():
+        shutil.copyfile(tpl_path, out_path)
+    return out_path
+
+def append_row(row: dict, cfg: dict) -> None:
+    csv_path = Path(cfg["output"].get("today_pick", "output/today_pick.csv"))
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = csv_path.exists()
+    with csv_path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        # write row with only expected fields (order guaranteed by CSV_FIELDS)
+        writer.writerow({k: row.get(k, "") for k in CSV_FIELDS})
+
+
+# -------------------------------------------------------------------
+# Enrichment (adds prev_close, ATR, gap %, RVOL, ATR_Stretch)
+# -------------------------------------------------------------------
+def enrich_rows(snapshots: list[dict], trade_date: str) -> list[dict]:
     """
-    rows: iterable of dicts from your today_pick feed or in-memory scan, containing at least:
-      date, ticker, premarket_high, open_price, last_price, intraday_volume,
-      avg_daily_volume, prev_close, has_catalyst, atr_14
+    snapshots: list of dicts from fetch_snapshots(); must include "ticker".
+    Returns rows enriched for scoring & CSV output.
     """
-    candidates = []
-    for r in rows:
-        candidates.append(Candidate(
-            date=r["date"],
-            ticker=r["ticker"],
-            premarket_high=float(r["premarket_high"]),
-            open_price=float(r["open_price"]),
-            last_price=float(r["last_price"]),
-            intraday_volume=int(r["intraday_volume"]),
-            avg_daily_volume=float(r["avg_daily_volume"]),
-            prev_close=float(r["prev_close"]),
-            has_catalyst=bool(r.get("has_catalyst", False)),
-            atr_14=float(r["atr_14"]),
-            # If you already have these computed upstream, pass them through:
-            gap_pct=r.get("gap_pct"),
-            rvol=r.get("rvol"),
-            atr_stretch=r.get("atr_stretch"),
-        ))
+    enriched: list[dict] = []
+    for s in snapshots:
+        tkr = s.get("ticker")
+        if not tkr:
+            continue
 
-    winner = select_final_pick(
-        candidates,
-        weights=weights,
-        min_liquidity=min_liquidity,
-    )
-    if winner:
-        write_final_pick(winner, path="output/final_pick.csv")
-        return winner
-    return None
+        prev_close = pa.get_previous_close(tkr)
+        pm_high    = pa.get_premarket_high(tkr, trade_date)
+        atr_14     = pa.get_atr_14(tkr, trade_date)
 
-## -------------------------------------------------------------------
-## Row Enrichment Utility
-##  - Takes simple scored snapshots
-##  - Adds premarket high, intraday vol, catalysts, etc.
-## -------------------------------------------------------------------
-from src.adapters import polygon_adapter as pa
+        # Pull intraday/avg volumes from adapter (safer than relying on snapshot shape)
+        intraday_vol = pa.get_intraday_volume(tkr, trade_date)
+        avg_vol      = pa.get_avg_daily_volume(tkr, lookback=20)
 
-def enrich_rows(rows, trade_date: str):
-    enriched = []
-    for r in rows:
-        tkr = r["ticker"]
+        # Prices: prefer snapshot last_price if present; fall back gracefully
+        last_price = s.get("last_price") or prev_close or 0.0
+        open_price = last_price  # until we wire explicit 09:30 open
+
+        gap_pct = ((open_price - prev_close) / prev_close * 100.0) if prev_close else None
+        rvol    = (intraday_vol / avg_vol) if avg_vol else None
+        atr_stretch = ((last_price - prev_close) / atr_14) if atr_14 else None
+
         enriched.append({
             "date": trade_date,
+            "time": datetime.now().strftime("%H:%M"),
             "ticker": tkr,
-            "premarket_high": pa.get_premarket_high(tkr, trade_date),
-            "open_price": r.get("last_price") or r.get("prev_close"),  # fallback
-            "last_price": r.get("last_price") or 0,
-            "intraday_volume": pa.get_intraday_volume(tkr, trade_date),
-            "avg_daily_volume": pa.get_avg_daily_volume(tkr, lookback=20),
-            "prev_close": r.get("prev_close") or 0,
-            "has_catalyst": (
-                pa.has_recent_news(tkr, days=1)
-                or pa.has_earnings_today(tkr, trade_date)
-            ),
-            "atr_14": 1.0,  # placeholder until ATR calc wired
-            "gap_pct": r.get("gap_pct"),
+            "premarket_high": pm_high,
+            "open_price": open_price,
+            "last_price": last_price,
+            "intraday_volume": intraday_vol,
+            "avg_daily_volume": avg_vol,
+            "prev_close": prev_close,
+            "gap_pct": round(gap_pct, 2) if gap_pct is not None else "",
+            "rvol": round(rvol, 2) if rvol is not None else "",
+            "atr_14": atr_14 if atr_14 else "",
+            "atr_stretch": round(atr_stretch, 2) if atr_stretch is not None else "",
         })
     return enriched
 
-def _get_liq_cfg(cfg, logger=None):
-    liq_cfg = {
-        "min_intraday_shares": cfg.get("liquidity", {}).get("min_intraday_shares", 50),
-        "min_avg_daily_volume": cfg.get("liquidity", {}).get("min_avg_daily_volume", 50),
-        "min_dollar_volume": cfg.get("liquidity", {}).get("min_dollar_volume", 500),
-        "min_price": cfg.get("liquidity", {}).get("min_price", 0.1),
-        "require_prices": cfg.get("liquidity", {}).get("require_prices", False),
-    }
 
-    if logger:
-        logger.info(f"Liquidity config loaded: {liq_cfg}")
-
-    return liq_cfg
-
-def _dollar_volume(row):
-    last = row.get("last_price") or row.get("last")
-    vol = row.get("intraday_volume", 0) or 0
+# -------------------------------------------------------------------
+# Liquidity filters
+# -------------------------------------------------------------------
+def _dollar_volume(row: dict) -> float:
     try:
-        return float(last) * int(vol)
+        return float(row.get("last_price", 0)) * int(row.get("intraday_volume", 0))
     except Exception:
         return 0.0
 
-## -------------------------------------------------------------------
-## Liquidity Filters
-## -------------------------------------------------------------------
-## - Loads liquidity thresholds from config (with fallback to min_liquidity)
-## - Computes dollar volume
-## - Drops rows missing prices or failing liquidity rules
-## - Logs stats on dropped vs passed
-## -------------------------------------------------------------------
-def apply_liquidity_filters(rows: list[dict], liq_cfg: dict, logger=None) -> list[dict]:
-    """
-    Filter enriched rows based on liquidity & data quality.
-    Requires fields typically set by enrich_rows:
-      - last_price (or last)
-      - prev_close
-      - intraday_volume
-      - avg_daily_volume
-    """
-    if not rows:
-        return []
-
-    min_shares = liq_cfg["min_intraday_shares"]
-    min_avg   = liq_cfg["min_avg_daily_volume"]
-    min_px    = liq_cfg["min_price"]
-    min_dv    = liq_cfg["min_dollar_volume"]
-    need_px   = liq_cfg["require_prices"]
-
-    out = []
-    dropped_stats = {"missing_prices":0, "price_floor":0, "shares":0, "avg":0, "dollar":0}
+def apply_liquidity_filters(rows: list[dict], liq_cfg: dict, logger: logging.Logger | None = None) -> list[dict]:
+    out: list[dict] = []
+    dropped = {"missing_prices":0, "price_floor":0, "shares":0, "avg":0, "dollar":0}
 
     for r in rows:
-        last = r.get("last_price") or r.get("last")
+        last = r.get("last_price")
         prev = r.get("prev_close")
-        if need_px and (not last or not prev or prev == 0):
-            dropped_stats["missing_prices"] += 1
-            continue
-
-        try:
-            last_f = float(last) if last is not None else 0.0
-        except Exception:
-            last_f = 0.0
-
-        if last_f < min_px:
-            dropped_stats["price_floor"] += 1
-            continue
-
-        shares = int(r.get("intraday_volume", 0) or 0)
-        if shares < min_shares:
-            dropped_stats["shares"] += 1
-            continue
-
-        avg = int(r.get("avg_daily_volume", 0) or 0)
-        if avg < min_avg:
-            dropped_stats["avg"] += 1
-            continue
-
-        dv = _dollar_volume(r)
-        if dv < min_dv:
-            dropped_stats["dollar"] += 1
-            continue
-
+        if liq_cfg["require_prices"] and (not last or not prev or prev == 0):
+            dropped["missing_prices"] += 1; continue
+        if float(last or 0.0) < float(liq_cfg["min_price"]):
+            dropped["price_floor"] += 1; continue
+        if int(r.get("intraday_volume", 0) or 0) < int(liq_cfg["min_intraday_shares"]):
+            dropped["shares"] += 1; continue
+        if int(r.get("avg_daily_volume", 0) or 0) < int(liq_cfg["min_avg_daily_volume"]):
+            dropped["avg"] += 1; continue
+        if _dollar_volume(r) < float(liq_cfg["min_dollar_volume"]):
+            dropped["dollar"] += 1; continue
         out.append(r)
 
     if logger:
-        before, after = len(rows), len(out)
-        logger.info(f"💧 Liquidity gate: {after}/{before} passed "
-                    f"(dropped missing_prices={dropped_stats['missing_prices']}, "
-                    f"price_floor={dropped_stats['price_floor']}, shares={dropped_stats['shares']}, "
-                    f"avg={dropped_stats['avg']}, dollar={dropped_stats['dollar']})")
+        logger.info(f"💧 Liquidity gate: {len(out)}/{len(rows)} passed (dropped {dropped})")
     return out
 
-## -------------------------------------------------------------------
-## Scanner Main Loop
-##  - Runs continuous premarket scanning until window closes
-##  - Fetches snapshots → scores → enriches → applies liquidity filters
-##  - Logs movers, writes watchlist, and auto-selects final pick at 09:50
-## -------------------------------------------------------------------
-def run():
+# -------------------------------------------------------------------
+# Main loop (premarket) and one-shot entrypoint
+# -------------------------------------------------------------------
+def _final_pick_row(base: dict, score: float, final: bool, rationale: str) -> dict:
+    """Map a scored/enriched item to the CSV schema row."""
+    return {
+        "date": base.get("date", ""),
+        "time": base.get("time", datetime.now().strftime("%H:%M")),
+        "ticker": base.get("ticker", ""),
+        "gap_pct": base.get("gap_pct", ""),
+        "rvol": base.get("rvol", ""),
+        "atr_stretch": base.get("atr_stretch", ""),
+        "premarket_high": base.get("premarket_high", ""),
+        "open_price": base.get("open_price", ""),
+        "score": round(score, 3) if isinstance(score, (int, float)) else score,
+        "final_pick": "TRUE" if final else "FALSE",
+        "rationale": rationale or "",
+    }
+
+def _pick_winner(scored: list[dict]) -> dict | None:
+    """Select winner as top-scored row (assumes score_snapshots returned 'score' on each)."""
+    if not scored:
+        return None
+    return max(scored, key=lambda r: r.get("score", float("-inf")))
+
+def run_once(cfg: dict, logger: logging.Logger, force_final_pick: bool = False) -> None:
+    """Single pass (used by --once and by the loop)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    ensure_today_pick_ready(cfg, reset=False)  # keep file; created earlier
+
+    # --- Debug mode: always inject dummy row, skip rest ---
+    if cfg.get("debug", {}).get("enable", False):
+        dbg = cfg["debug"]
+        dummy = {
+            "date": today,
+            "time": datetime.now().strftime("%H:%M"),
+            "ticker": dbg["dummy_ticker"],
+            "gap_pct": dbg["dummy_gap"],
+            "rvol": 1.0,
+            "atr_stretch": 1.0,
+            "premarket_high": 0,
+            "open_price": dbg["dummy_price"],
+        }
+        row = _final_pick_row(dummy, score=dbg["dummy_score"], final=True, rationale=dbg.get("rationale", "Debug"))
+        append_row(row, cfg)
+        logger.info(f"⚠️ Debug: Appended dummy Final Pick -> {cfg['output'].get('today_pick', 'output/today_pick.csv')}")
+        return
+
+    # --- Normal path ---
+    snaps = fetch_snapshots(limit=50)
+    enriched = enrich_rows(snaps, today) if snaps else []
+    filtered = apply_liquidity_filters(enriched, cfg["liquidity"], logger) if enriched else []
+
+    if not filtered:
+        logger.warning("No tickers passed liquidity filters — skipping scoring/final pick.")
+        return
+
+    # Score + log movers
+    scored = score_snapshots(filtered, cfg["scoring_weights"])
+    log_top_movers(scored, n=5)
+
+    # Watchlist
+    write_watchlist(cfg["output"]["watchlist"], scored[:5], cfg["targets"])
+
+    # Final pick decision
+    do_final = force_final_pick or is_final_pick_time()
+    if not do_final:
+        return
+
+    winner = _pick_winner(scored)
+    if not winner:
+        logger.warning("⚠️ No winner after scoring.")
+        return
+
+    row = _final_pick_row(winner, score=winner.get("score", ""), final=True, rationale="")
+    append_row(row, cfg)
+    logger.info(f"[PRE] 📌 Final Pick: {row['ticker']} (score={row['score']})")
+
+def run() -> None:
     cfg = load_config()
     logger = setup_logger(cfg["output"]["log"])
-
     cadence = int(cfg["premarket"]["cadence_minutes"])
+
+    # Always reset/seed today_pick with the template at process start
+    ensure_today_pick_ready(cfg, reset=True)
     logger.info("Starting premarket scanner loop...")
 
     while within_premarket_window(cfg):
         try:
-            snapshots = fetch_snapshots(limit=50)
-
-            if snapshots:
-                logger.info(f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}")
-                snap_dict = {s["ticker"]: s for s in snapshots if "ticker" in s}
-
-                # --- Enrich rows before scoring ---
-                today = datetime.now().strftime("%Y-%m-%d")
-                enriched = enrich_rows(snap_dict, today)
-
-                # --- Apply Liquidity Filters ---
-                liq_cfg = _get_liq_cfg(cfg, logger=logger)
-                filtered = apply_liquidity_filters(enriched, liq_cfg, logger=logger)
-                logger.info(f"Liquidity filter kept {len(filtered)}/{len(enriched)} rows")
-
-                # --- Score after filtering ---
-                if filtered:
-                    scored = score_snapshots(filtered, cfg["scoring_weights"])
-                    log_top_movers(scored, n=5)
-
-                    # --- Final Pick (auto at 09:50) ---
-                    if is_final_pick_time():
-                        winner = finalize_pick_from_rows(
-                            scored,
-                            cfg["scoring_weights"],
-                            liq_cfg["min_intraday_shares"],  # backward-compatible param
-                        )
-                        if winner:
-                            logger.info(
-                                f"[PRE] 📌 Final Pick of the Day (09:50 ET): "
-                                f"{winner['Ticker']} (${winner['PickPrice']}, {winner['GapPct']}%)"
-                            )
-
-                    # --- Write watchlist (top 5 scored for visibility) ---
-                    top5 = scored[:5]
-                    write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
-                else:
-                    logger.warning("No tickers passed liquidity filters — skipping scoring/final pick.")
-            else:
-                logger.warning("No snapshots returned this cycle")
-
+            run_once(cfg, logger, force_final_pick=False)
         except Exception as e:
             logger.error(f"❌ Error during scan tick: {e}", exc_info=True)
-
         time.sleep(cadence * 60)
 
     logger.info("Premarket window closed. Scanner stopped.")
 
-
-## -------------------------------------------------------------------
-## Entrypoint
-##  - Supports one-off run (--once) with optional --final-pick-now
-##  - Otherwise runs continuous premarket loop
-##  - Applies enrichment + liquidity filters before final pick
-## -------------------------------------------------------------------
-if "--once" in sys.argv:
+# -------------------------------------------------------------------
+# Entrypoint
+# -------------------------------------------------------------------
+if __name__ == "__main__":
     cfg = load_config()
     logger = setup_logger(cfg["output"]["log"])
-    snapshots = fetch_snapshots(limit=50)
 
-    if snapshots:
-        print("Sample snapshot:", snapshots[0])  # console debug
-        logger.info(
-            f"Fetched {len(snapshots)} tickers, sample: {[s['ticker'] for s in snapshots[:3]]}"
-        )
+    # Seed CSV at start for both modes
+    ensure_today_pick_ready(cfg, reset=True)
 
-        # --- Enrich + Liquidity ---
-        today = datetime.now().strftime("%Y-%m-%d")
-        enriched = enrich_rows(snapshots, today)
-
-        liq_cfg = _get_liq_cfg(cfg, logger=logger)
-        filtered = apply_liquidity_filters(enriched, liq_cfg, logger=logger)
-
-        if filtered:
-            scored = score_snapshots(filtered, cfg["scoring_weights"])
-            log_top_movers(scored, n=5)
-
-            # --- Final Pick (manual trigger or at 09:50) ---
-            force_final_pick = "--final-pick-now" in sys.argv
-            if (force_final_pick or is_final_pick_time()):
-                winner = finalize_pick_from_rows(
-                    scored,
-                    cfg["scoring_weights"],
-                    liq_cfg["min_intraday_shares"],  # backward-compatible param
-                )
-                if winner:
-                    logger.info(
-                        f"[PRE] 📌 Final Pick of the Day: "
-                        f"{winner['Ticker']} (${winner['PickPrice']}, {winner['GapPct']}%)"
-                    )
-
-            # --- Write watchlist (top 5 scored for visibility) ---
-            top5 = scored[:5]
-            write_watchlist(cfg["output"]["watchlist"], top5, cfg["targets"])
-        else:
-            logger.warning("No tickers passed liquidity filters — skipping scoring/final pick.")
+    if "--once" in sys.argv:
+        force = "--final-pick-now" in sys.argv
+        try:
+            run_once(cfg, logger, force_final_pick=force)
+        except Exception as e:
+            logger.error(f"❌ Error in --once run: {e}", exc_info=True)
     else:
-        logger.warning("No snapshots returned")
-else:
-    run()
-
-
-
+        run()

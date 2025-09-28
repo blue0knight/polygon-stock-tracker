@@ -1,4 +1,6 @@
+# -------------------------------------------------------------------
 # Premarket scanner config
+# -------------------------------------------------------------------
 
 premarket:
   start_time: "04:00"      # ET, earliest candles to scan
@@ -9,13 +11,20 @@ postmarket:
   start_time: "16:00"      # ET, after regular market close
   end_time: "20:00"        # ET, last extended hours window
   cadence_minutes: 5       # same as premarket
-  
+
+# -------------------------------------------------------------------
+# Scoring Weights
+# -------------------------------------------------------------------
 scoring_weights:
   gap_percent: 0.4
   rvol: 0.3
   atr_stretch: 0.2
   catalyst: 0.1
+  atr_threshold: 2.0   # default=2.0, safeguard for extreme stretch
 
+# -------------------------------------------------------------------
+# Thresholds for candidates
+# -------------------------------------------------------------------
 thresholds:
   min_gap_percent: 3.0     # ignore < 3% gappers
   min_rvol: 1.5
@@ -23,53 +32,63 @@ thresholds:
   pump_rvol: 4.0
   pump_atr: 1.8
 
+# -------------------------------------------------------------------
+# Buffers (breakouts/pullbacks)
+# -------------------------------------------------------------------
 buffer:
   breakout_buffer_pct: 0.003   # 0.3% above PM high
   pullback_fib_low: 0.38
   pullback_fib_high: 0.62
 
+# -------------------------------------------------------------------
+# Risk management
+# -------------------------------------------------------------------
 risk:
   max_risk_pct: 0.5        # max NAV risk per trade
   daily_loss_cap_pct: 1.0  # stop trading for day
 
+# -------------------------------------------------------------------
+# Output files
+# -------------------------------------------------------------------
 output:
   watchlist: "output/watchlist.csv"
   missed: "output/missed.csv"
+  today_pick: "output/today_pick.csv"     # 👈 NEW: explicit path
   log: "logs/scanner.log"
   schema: "schemas/watchlist.schema.json"
 
+# -------------------------------------------------------------------
+# Pump-prone (timing rules)
+# -------------------------------------------------------------------
 pump_prone:
   earliest_entry: "09:35"
   time_stop: "11:30"
 
+# -------------------------------------------------------------------
+# Profit Targets
+# -------------------------------------------------------------------
 targets:
   t1: 0.10
   t2: 0.18
   stretch: 0.22
 
-scoring_weights:
-  gap_percent: 0.4
-  rvol: 0.3
-  atr_stretch: 0.2
-  catalyst: 0.1
-  atr_threshold: 2.0   # optional, default=2.0
-
-min_liquidity: 100000  # 👈 new, safeguard for volume filters
-
-# liquidity:
-#   min_intraday_shares: 100000      # real-time shares traded today
-#   min_avg_daily_volume: 500000     # 30/60D avg, whatever your adapter returns
-#   min_dollar_volume: 300000        # last_price * intraday_volume
-#   min_price: 1.0                   # skip sub-1 tickers
-#   require_prices: true             # drop if last/prev_close are missing/zero
-
 # -------------------------------------------------------------------
-# Debug mode (loosened thresholds)
-# Uncomment this block and comment out the one above to test
+# Liquidity filters (production defaults)
 # -------------------------------------------------------------------
 liquidity:
-  min_intraday_shares: 50
-  min_avg_daily_volume: 50
-  min_dollar_volume: 500
-  min_price: 0.1
-  require_prices: false
+  min_intraday_shares: 100000     # real-time shares traded today
+  min_avg_daily_volume: 500000    # 30/60D avg
+  min_dollar_volume: 300000       # last_price * intraday_volume
+  min_price: 1.0                  # skip sub-1 tickers
+  require_prices: true            # drop if last/prev_close missing
+
+# -------------------------------------------------------------------
+# Debug Mode (toggle only, don’t touch thresholds)
+# -------------------------------------------------------------------
+debug:
+  enable: true       # 👈 flip true for weekends/testing
+  dummy_ticker: QURE
+  dummy_price: 0.18
+  dummy_gap: 0.22
+  dummy_score: 9.9
+  rationale: "Debug placeholder - weekend run"
