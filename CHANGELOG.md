@@ -1,5 +1,19 @@
 ## [dev/final-pick] - 2025-09-27
 ### Added
+- `today_pick.csv` single-file schema with FinalPick flag and rationale.
+- New schema files: `schemas/today_pick.schema.json` and `schemas/today_pick_template.csv`.
+- ATR-14 calculation and enrichment in `polygon_adapter.py`.
+- Debug mode toggle in `scanner.yaml` (injects dummy ticker on weekends/testing).
+- Auto-seeding of CSV headers from template on scanner startup.
+
+### Changed
+- Updated `scanner.py` to enrich rows with ATR, gap %, RVOL, ATR stretch, rationale.
+- Centralized Final Pick row appending via `_final_pick_row()` and `append_row()`.
+- Liquidity filter logic clarified (drops logged by category).
+
+
+## [dev/final-pick] - 2025-09-27
+### Added
 - Liquidity filters (configurable via `scanner.yaml`):
   - min_intraday_shares
   - min_avg_daily_volume
