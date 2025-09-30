@@ -4,13 +4,17 @@
 
 premarket:
   start_time: "04:00"      # ET, earliest candles to scan
-  end_time: "09:50"        # ET, accounts for 15 min delay at open
+  end_time: "11:30"        # ET, accounts for 15 min delay at open
   cadence_minutes: 5       # keep 5 min polling
 
 postmarket:
   start_time: "16:00"      # ET, after regular market close
   end_time: "20:00"        # ET, last extended hours window
-  cadence_minutes: 5       # same as premarket
+  cadence_minutes: 5      # same as premarket
+
+open_selection:
+  selection_window: "09:30-09:35"   # default if omitted - 09:30 - 09:35
+  candidate_pool_size: 20          # default: 100
 
 # -------------------------------------------------------------------
 # Scoring Weights
@@ -26,7 +30,7 @@ scoring_weights:
 # Thresholds for candidates
 # -------------------------------------------------------------------
 thresholds:
-  min_gap_percent: 3.0     # ignore < 3% gappers
+  min_gap_percent: 0.0     # ignore < 3% gappers
   min_rvol: 1.5
   pump_gap_percent: 25.0   # auto-flag pump prone
   pump_rvol: 4.0
@@ -72,21 +76,46 @@ targets:
   t2: 0.18
   stretch: 0.22
 
-# -------------------------------------------------------------------
-# Liquidity filters (production defaults)
-# -------------------------------------------------------------------
+## -------------------------------------------------------------------
+## BLOCK: liquidity-dual  |  FILE: configs/scanner.yaml  |  DATE: 2025-09-29
+## PURPOSE: Split liquidity thresholds by session (premarket vs regular)
+## ANCHOR: "liquidity:"
+## NOTES:
+##   - Premarket: looser filters, accounts for low early volume
+##   - Regular: strict filters, matches production defaults
+## -------------------------------------------------------------------
+# BEGIN liquidity-dual
 liquidity:
-  min_intraday_shares: 100000     # real-time shares traded today
-  min_avg_daily_volume: 500000    # 30/60D avg
-  min_dollar_volume: 300000       # last_price * intraday_volume
-  min_price: 1.0                  # skip sub-1 tickers
-  require_prices: true            # drop if last/prev_close missing
+  premarket:
+    min_intraday_shares: 100       # default: 5000
+    min_avg_daily_volume: 100000    # default: 500000
+    min_dollar_volume: 5000        # default: 25000
+    min_price: 0.5                  # default: 1.0
+    require_prices: true
+
+  regular:
+    min_intraday_shares: 100000   # default: 500000
+    min_avg_daily_volume: 500000  # default: 300000
+    min_dollar_volume: 300000     # default: 100000
+    min_price: 1.0
+    require_prices: true
+# END liquidity-dual
+
+# -------------------------------------------------------------------
+# Group Watchlist (logs only)
+# -------------------------------------------------------------------
+group_watchlist:
+  - SPHL
+  - TWG
+  - MASK
+  - RVYL
+
 
 # -------------------------------------------------------------------
 # Debug Mode (toggle only, don’t touch thresholds)
 # -------------------------------------------------------------------
 debug:
-  enable: true       # 👈 flip true for weekends/testing
+  enable: false       # 👈 flip true for weekends/testing
   dummy_ticker: QURE
   dummy_price: 0.18
   dummy_gap: 0.22
