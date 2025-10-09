@@ -1,56 +1,62 @@
-# Premarket Top-5 Scanner
+# Stock Scanner & Trade Analyzer
 
-A local rule-based tool that connects to the Polygon API, scans premarket tickers, ranks the **Top 5 movers by gap %**, logs results, and supports paper-trading with a journal and weekly summaries.
+A full-day scanner that monitors stocks from premarket through market close, identifies top movers using multi-factor scoring (gap %, volume, momentum), and provides end-of-day analysis with optimal entry/exit windows. Includes trading journal and performance tracking.
 
 ---
 
 ## Features
-- **Premarket scanning (04:00–09:27 ET)** with configurable cadence
-- **Gap % scoring** and Top-5 ranking
-- **Watchlist output** → `output/watchlist.csv`
-- **Logging** → `logs/scanner.log` with Top-5 each cycle
-- **Paper-trading journal** → record hypothetical trades in `output/journal.csv`
-- **Weekly analyzer** → generate summaries of wins/losses and P&L
+- **Premarket scanning (04:00–09:30 ET)** with configurable cadence
+- **Intraday monitoring (09:30–16:00 ET)** with heartbeat detection (catches slow climbers)
+- **Pick of the Day** → Scanner selects top pick at 9:50 AM
+- **End-of-Day analysis** → Identifies best catchable opportunities with entry/exit windows
+- **Trading journal** → Track actual trades and compare vs. best picks
+- **Weekly analyzer** → Generate summaries of wins/losses and P&L
+- **Gap % + volume + heartbeat scoring** for Top-5 ranking
 
 ---
 
 ## Repo Structure
 ```
 .
-├── CHANGELOG.md
 ├── README.md
-├── backtest/
+├── requirements.txt
+├── docs/                          # Documentation
+│   ├── CHANGELOG.md
+│   ├── EOD_ANALYSIS.md           # End-of-day analysis guide
+│   ├── SYSTEM_GUIDE.md           # Complete system guide
+│   └── archive/
 ├── configs/
-│   ├── scanner.example.yaml
-│   └── scanner.yaml
-├── data/
-├── logs/
-│   └── scanner.log
+│   ├── scanner.yaml
+│   └── group_watchlist.csv
+├── logs/                          # Scanner logs (gitignored)
+│   └── scanner_YYYY-MM-DD.log
 ├── output/
-│   └── watchlist.csv
+│   ├── journal.csv               # Your actual trades
+│   ├── missed.csv                # Historical best picks
+│   ├── today_pick.csv            # Scanner's daily pick
+│   ├── watchlist.csv
+│   └── reports/                  # Daily EOD reports (gitignored)
+│       └── eod_report_*.md
 ├── schemas/
 │   ├── journal_template.csv
-│   ├── missed_template.csv
-│   ├── recommendations_buy.schema.json
-│   ├── watchlist.schema.json
-│   └── watchlist_template.csv
+│   ├── today_pick.schema.json
+│   └── watchlist.schema.json
 ├── scripts/
-│   ├── analyze_week.py
-│   ├── test_fetch.py
-│   └── validate_csv.py
+│   ├── analyze_eod.py            # End-of-day analysis
+│   ├── analyze_week.py           # Weekly summary
+│   ├── log_today_trades.py       # Quick trade logger
+│   └── run_eod_analysis.sh       # Automation script
 ├── src/
 │   ├── adapters/
 │   │   └── polygon_adapter.py
+│   ├── analysis/                 # Analysis tools
 │   ├── core/
 │   │   ├── scoring.py
 │   │   ├── output.py
 │   │   └── journal.py
-│   ├── scanner/
-│   │   └── scanner.py
-│   └── utils/
-├── test_polygon.py
+│   └── scanner/
+│       └── scanner.py            # Main scanner (heartbeat fix)
 └── tests/
-    └── test_scoring.py
 ```
 
 ---
@@ -73,7 +79,7 @@ python -m src.scanner.scanner --once
 - Prints sample snapshot + Top-5 movers
 - Writes rows into `output/watchlist.csv`
 
-### 3. Live Run (premarket loop)
+### 3. Live Run (full-day scan)
 ```bash
 python -m src.scanner.scanner
 ```
@@ -95,14 +101,36 @@ record_trade("output/journal.csv",
              notes="Paper trade")
 ```
 
-### 5. Weekly Summary
+### 5. End-of-Day Analysis
+```bash
+python scripts/analyze_eod.py
+```
+Analyzes today's scanner log and identifies:
+- Best catchable picks (>8% gain)
+- Optimal entry/exit windows
+- Compares your actual trades vs. best picks
+
+### 6. Log Your Trades
+```bash
+python scripts/log_today_trades.py
+```
+Interactive CLI to log your trades to `journal.csv`.
+
+### 7. Weekly Summary
 ```bash
 python scripts/analyze_week.py
 ```
-Outputs a Markdown report in `output/`:
+Outputs a Markdown report:
 - Total trades, win rate, avg P/L
 - Best/worst trades
 - P/L per ticker
+
+---
+
+## 📚 Documentation
+
+- **[EOD Analysis Guide](docs/EOD_ANALYSIS.md)** - How end-of-day analysis works
+- **[Changelog](docs/CHANGELOG.md)** - Version history and changes
 
 ---
 

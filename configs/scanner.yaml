@@ -1,48 +1,123 @@
+# -------------------------------------------------------------------
 # Premarket scanner config
+# -------------------------------------------------------------------
 
 premarket:
   start_time: "04:00"      # ET, earliest candles to scan
-  end_time: "09:50"        # ET, accounts for 15 min delay at open
+  end_time: "09:30"        # ET, stop at market open (then run open_selection)
   cadence_minutes: 5       # keep 5 min polling
 
 postmarket:
   start_time: "16:00"      # ET, after regular market close
   end_time: "20:00"        # ET, last extended hours window
-  cadence_minutes: 5       # same as premarket
-  
+  cadence_minutes: 5      # same as premarket
+
+open_selection:
+  selection_window: "09:50-09:55"   # Pick at 9:50 ET (15min into session for confirmation)
+  candidate_pool_size: 20           # Top 20 gappers to evaluate
+
+# -------------------------------------------------------------------
+# Scoring Weights
+# -------------------------------------------------------------------
 scoring_weights:
   gap_percent: 0.4
   rvol: 0.3
   atr_stretch: 0.2
   catalyst: 0.1
+  atr_threshold: 2.0   # default=2.0, safeguard for extreme stretch
 
+# -------------------------------------------------------------------
+# Thresholds for candidates
+# -------------------------------------------------------------------
 thresholds:
-  min_gap_percent: 3.0     # ignore < 3% gappers
+  min_gap_percent: 0.0     # ignore < 3% gappers
   min_rvol: 1.5
   pump_gap_percent: 25.0   # auto-flag pump prone
   pump_rvol: 4.0
   pump_atr: 1.8
 
+# -------------------------------------------------------------------
+# Buffers (breakouts/pullbacks)
+# -------------------------------------------------------------------
 buffer:
   breakout_buffer_pct: 0.003   # 0.3% above PM high
   pullback_fib_low: 0.38
   pullback_fib_high: 0.62
 
+# -------------------------------------------------------------------
+# Risk management
+# -------------------------------------------------------------------
 risk:
   max_risk_pct: 0.5        # max NAV risk per trade
   daily_loss_cap_pct: 1.0  # stop trading for day
 
+# -------------------------------------------------------------------
+# Output files
+# -------------------------------------------------------------------
 output:
   watchlist: "output/watchlist.csv"
   missed: "output/missed.csv"
+  today_pick: "output/today_pick.csv"     # 👈 NEW: explicit path
   log: "logs/scanner.log"
   schema: "schemas/watchlist.schema.json"
 
+# -------------------------------------------------------------------
+# Pump-prone (timing rules)
+# -------------------------------------------------------------------
 pump_prone:
   earliest_entry: "09:35"
   time_stop: "11:30"
 
+# -------------------------------------------------------------------
+# Profit Targets
+# -------------------------------------------------------------------
 targets:
   t1: 0.10
   t2: 0.18
   stretch: 0.22
+
+## -------------------------------------------------------------------
+## BLOCK: liquidity-dual  |  FILE: configs/scanner.yaml  |  DATE: 2025-09-29
+## PURPOSE: Split liquidity thresholds by session (premarket vs regular)
+## ANCHOR: "liquidity:"
+## NOTES:
+##   - Premarket: looser filters, accounts for low early volume
+##   - Regular: strict filters, matches production defaults
+## -------------------------------------------------------------------
+# BEGIN liquidity-dual
+liquidity:
+  premarket:
+    min_intraday_shares: 100       # default: 5000
+    min_avg_daily_volume: 100000    # default: 500000
+    min_dollar_volume: 5000        # default: 25000
+    min_price: 1.0                  # $1 minimum for both current price AND prev_close (NASDAQ compliance)
+    require_prices: true
+
+  regular:
+    min_intraday_shares: 50000    # Lowered for small-cap gappers (was 100000)
+    min_avg_daily_volume: 100000  # Lowered to capture penny stocks (was 500000)
+    min_dollar_volume: 50000      # Lowered for small-cap plays (was 300000)
+    min_price: 1.0                # $1 minimum for both current price AND prev_close (NASDAQ compliance)
+    require_prices: true
+# END liquidity-dual
+
+# -------------------------------------------------------------------
+# Group Watchlist (logs only)
+# -------------------------------------------------------------------
+group_watchlist:
+  - RVYL
+  - UCFI
+  - CJET
+  - EPSM
+
+
+# -------------------------------------------------------------------
+# Debug Mode (toggle only, don’t touch thresholds)
+# -------------------------------------------------------------------
+debug:
+  enable: false       # 👈 flip true for weekends/testing
+  dummy_ticker: QURE
+  dummy_price: 0.18
+  dummy_gap: 0.22
+  dummy_score: 9.9
+  rationale: "Debug placeholder - weekend run"
