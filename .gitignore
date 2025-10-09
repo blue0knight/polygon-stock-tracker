@@ -5,6 +5,7 @@
 
 # --- Python ---
 .venv/
+venv/
 __pycache__/
 *.pyc
 
@@ -15,17 +16,28 @@ __pycache__/
 
 # --- Project Data (local only) ---
 data/
-output/
 logs/
 backtest/
+
+# --- Output (local generated files) ---
+output/reports/
+output/*.csv
+output/today_pick.csv
+output/missed.csv
+output/watchlist.csv
 
 # --- Artifacts ---
 *.parquet
 *.sqlite
 *.db
 *.xlsx
-*.csv
 
 # --- Allow templates in schemas/ ---
 !schemas/*.csv
 !schemas/*.json
+
+# --- Documentation archives (keep versioned docs only) ---
+docs/archive/
+
+# --- Private Documentation (contains specific trades/performance) ---
+docs/SYSTEM_GUIDE.md
