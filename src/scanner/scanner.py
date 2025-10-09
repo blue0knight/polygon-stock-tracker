@@ -1454,7 +1454,31 @@ def run() -> None:
 
         # Dynamic cadence (will be 5 min during market hours)
         cadence = get_scan_cadence_minutes()
-        time.sleep(cadence * 60)
+        sleep_seconds = cadence * 60
+
+        # SMART SLEEP: If we haven't made a pick yet and 09:50 is coming up,
+        # wake up at 09:50 instead of sleeping the full cadence
+        if not pick_made:
+            now = datetime.now(pytz.timezone("America/New_York"))
+            sel_window = (cfg.get("open_selection", {}) or {}).get("selection_window", "09:50-09:55")
+            try:
+                start_s, _ = sel_window.split("-")
+                start_t = datetime.strptime(start_s.strip(), "%H:%M").time()
+            except Exception:
+                start_t = datetime.strptime("09:50", "%H:%M").time()
+
+            # Calculate target time for pick (09:50 today)
+            pick_time = pytz.timezone("America/New_York").localize(
+                datetime.combine(now.date(), start_t)
+            )
+            seconds_until_pick = (pick_time - now).total_seconds()
+
+            # If pick time is within the next sleep cycle, adjust sleep to wake at pick time
+            if 0 < seconds_until_pick <= sleep_seconds:
+                sleep_seconds = max(60, int(seconds_until_pick))  # At least 60 seconds
+                logger.info(f"⏰ Adjusting sleep to {sleep_seconds/60:.1f} min to wake at {start_t.strftime('%H:%M')} for pick selection")
+
+        time.sleep(sleep_seconds)
 
     logger.info("Scanner stopped.")
 
