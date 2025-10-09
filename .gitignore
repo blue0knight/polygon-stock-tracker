@@ -26,6 +26,9 @@ output/today_pick.csv
 output/missed.csv
 output/watchlist.csv
 
+# --- Config (user-specific, evolving) ---
+configs/group_watchlist.csv
+
 # --- Artifacts ---
 *.parquet
 *.sqlite

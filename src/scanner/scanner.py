@@ -1300,35 +1300,47 @@ def run() -> None:
     while True:
         now = datetime.now(pytz.timezone("America/New_York"))
 
-        # Fallback: if we missed the selection window (started late), force pick now
+        # EXPLICIT CHECK: Trigger at exact selection window start time
         if not pick_made:
-            # Check if we're past the selection window
-            sel_window = (cfg.get("open_selection", {}) or {}).get("selection_window", "09:30-09:35")
+            sel_window = (cfg.get("open_selection", {}) or {}).get("selection_window", "09:50-09:55")
             try:
-                _, end_s = sel_window.split("-")
+                start_s, end_s = sel_window.split("-")
+                start_t = datetime.strptime(start_s.strip(), "%H:%M").time()
                 end_t = datetime.strptime(end_s.strip(), "%H:%M").time()
             except Exception:
-                end_t = datetime.strptime("09:35", "%H:%M").time()
+                start_t = datetime.strptime("09:50", "%H:%M").time()
+                end_t = datetime.strptime("09:55", "%H:%M").time()
 
-            end_dt = pytz.timezone("America/New_York").localize(datetime.combine(now.date(), end_t))
-
-            # If we're past 09:35 and haven't made a pick yet, force it now
-            if now > end_dt:
-                logger.warning(f"⚠️ Missed selection window (ended {end_t.strftime('%H:%M')} ET). Forcing immediate pick at {now.strftime('%H:%M')} ET.")
+            # PRIORITY 1: Check if we're at the exact start time (09:50 sharp)
+            if now.hour == start_t.hour and now.minute == start_t.minute:
+                logger.info(f"⏰ {start_t.strftime('%H:%M')} ET - Selection window START - Making pick NOW...")
                 try:
-                    run_open_selection_once(cfg, logger, force=True)  # FORCE bypass window check
+                    run_open_selection_once(cfg, logger, force=True)
                     pick_made = True
-                    logger.info("📊 Late pick completed. Continuing to monitor through market close...")
+                    logger.info("📊 Pick completed. Continuing to monitor through market close...")
                 except Exception as e:
-                    logger.error(f"❌ Failed to make fallback pick: {e}", exc_info=True)
+                    logger.error(f"❌ Failed to make pick at window start: {e}", exc_info=True)
                     pick_made = True  # Prevent infinite retry
 
-        # Check if we're in selection window (normal path)
-        if within_open_selection_window(cfg) and not pick_made:
-            logger.info("✅ Selection window active, making pick...")
-            run_open_selection_once(cfg, logger)
-            pick_made = True
-            logger.info("📊 Continuing to monitor through market close...")
+            # PRIORITY 2: Check if we're within the selection window (normal path)
+            elif within_open_selection_window(cfg):
+                logger.info("✅ Selection window active, making pick...")
+                run_open_selection_once(cfg, logger)
+                pick_made = True
+                logger.info("📊 Continuing to monitor through market close...")
+
+            # PRIORITY 3: Fallback if we missed the window entirely
+            else:
+                end_dt = pytz.timezone("America/New_York").localize(datetime.combine(now.date(), end_t))
+                if now > end_dt:
+                    logger.warning(f"⚠️ Missed selection window (ended {end_t.strftime('%H:%M')} ET). Forcing immediate pick at {now.strftime('%H:%M')} ET.")
+                    try:
+                        run_open_selection_once(cfg, logger, force=True)
+                        pick_made = True
+                        logger.info("📊 Late pick completed. Continuing to monitor through market close...")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to make fallback pick: {e}", exc_info=True)
+                        pick_made = True  # Prevent infinite retry
 
         # Stop at market close (4:00 PM ET)
         if now.hour >= 16:

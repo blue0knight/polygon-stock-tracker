@@ -167,17 +167,49 @@ def select_final_pick(
 ## Snapshot Scoring + Logging
 ## -------------------------------------------------------------------
 def score_snapshots(snap_dict: Dict[str, Dict]) -> List[Dict]:
-    """Very simple scoring passthrough for compatibility with scanner."""
+    """
+    Score snapshots with composite score, rvol, and atr_stretch.
+    Returns list of dicts sorted by score (descending).
+    """
     rows = []
     for tkr, snap in snap_dict.items():
+        # Calculate gap_pct
+        prev_close = float(snap.get("prev_close", 0) or 0)
+        last_price = float(snap.get("last_price", 0) or 0)
+        gap_pct = compute_gap_pct(prev_close, last_price)
+
+        # Calculate rvol
+        intraday_volume = int(snap.get("intraday_volume", 0) or snap.get("volume", 0) or 0)
+        avg_daily_volume = float(snap.get("avg_daily_volume", 0) or 0)
+        rvol = compute_rvol(intraday_volume, avg_daily_volume) if avg_daily_volume > 0 else 0.0
+
+        # Calculate atr_stretch
+        atr_14 = float(snap.get("atr_14", 0) or 0)
+        atr_stretch = compute_atr_stretch(last_price, prev_close, atr_14) if atr_14 > 0 else 0.0
+
+        # Composite score (simple weighted formula)
+        # Gap: 40%, RVol: 30%, ATR: 20%, Catalyst: 10%
+        score = (
+            (gap_pct * 0.4) +
+            (min(rvol, 5.0) * 10.0 * 0.3) +  # Cap rvol at 5x, scale to 50
+            (min(atr_stretch, 5.0) * 10.0 * 0.2)  # Cap atr at 5, scale to 50
+        )
+
         rows.append({
             "ticker": tkr,
-            "last_price": snap.get("last_price"),
-            "prev_close": snap.get("prev_close"),
-            "gap_pct": compute_gap_pct(snap.get("prev_close", 0) or 0, snap.get("last_price", 0) or 0),
-            "volume": snap.get("volume", 0),
+            "last_price": last_price,
+            "prev_close": prev_close,
+            "gap_pct": gap_pct,
+            "volume": intraday_volume,
+            "rvol": round(rvol, 2),
+            "atr_stretch": round(atr_stretch, 2),
+            "atr_14": atr_14,
+            "avg_daily_volume": avg_daily_volume,
+            "score": round(score, 1),
+            # Pass through other fields that might exist
+            **{k: v for k, v in snap.items() if k not in ["ticker", "last_price", "prev_close", "volume"]}
         })
-    return sorted(rows, key=lambda r: r["gap_pct"], reverse=True)
+    return sorted(rows, key=lambda r: r.get("score", 0), reverse=True)
 
 def log_top_movers(scored, snapshots=None, n=5, tag=""):
     """
