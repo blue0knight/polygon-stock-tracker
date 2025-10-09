@@ -15,7 +15,7 @@ import yaml
 import shutil
 import logging
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -45,6 +45,359 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+def load_group_watchlist() -> list[str]:
+    """
+    Load group watchlist from CSV file.
+    Falls back to empty list if file doesn't exist.
+    """
+    csv_path = Path("configs/group_watchlist.csv")
+    if not csv_path.exists():
+        return []
+
+    tickers = []
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ticker = row.get("ticker", "").strip().upper()
+            if ticker:
+                tickers.append(ticker)
+    return tickers
+
+
+## -------------------------------------------------------------------
+## BLOCK: snapshot-history-tracker  |  FILE: src/scanner/scanner.py  |  DATE: 2025-10-01
+## PURPOSE: In-memory rolling history of last 3-5 snapshots per ticker for heartbeat detection
+## NOTES:
+##   - Stores: {ticker: [(timestamp, price, volume), ...]}
+##   - Max 5 snapshots per ticker (FIFO queue)
+##   - Used to detect price/volume movement (heartbeat)
+## -------------------------------------------------------------------
+from collections import deque, defaultdict
+
+# Global snapshot history (in-memory)
+SNAPSHOT_HISTORY = defaultdict(lambda: deque(maxlen=5))
+
+def record_snapshot(ticker: str, price: float, volume: int, timestamp: datetime = None) -> None:
+    """Record a snapshot for heartbeat tracking."""
+    if timestamp is None:
+        timestamp = datetime.now(pytz.timezone("America/New_York"))
+    SNAPSHOT_HISTORY[ticker].append((timestamp, price, volume))
+
+def get_snapshot_history(ticker: str) -> list:
+    """Get historical snapshots for a ticker (oldest to newest)."""
+    return list(SNAPSHOT_HISTORY[ticker])
+
+def clear_snapshot_history() -> None:
+    """Clear all snapshot history (call at start of new trading day)."""
+    SNAPSHOT_HISTORY.clear()
+
+## -------------------------------------------------------------------
+## BLOCK: market-open-price-tracker  |  FILE: src/scanner/scanner.py  |  DATE: 2025-10-09
+## PURPOSE: Track 9:30 AM open prices to calculate intraday movement after market opens
+## NOTES:
+##   - Stores: {ticker: open_price_at_930}
+##   - Used to calculate intraday % change instead of gap vs prev_close
+##   - Captured at first scan after 9:30 AM
+## -------------------------------------------------------------------
+MARKET_OPEN_PRICES = {}
+
+def record_market_open_price(ticker: str, price: float) -> None:
+    """Record 9:30 AM open price (only once per ticker per day)."""
+    if ticker not in MARKET_OPEN_PRICES:
+        MARKET_OPEN_PRICES[ticker] = price
+
+def get_market_open_price(ticker: str) -> float:
+    """Get recorded 9:30 AM open price, or None if not recorded."""
+    return MARKET_OPEN_PRICES.get(ticker)
+
+def clear_market_open_prices() -> None:
+    """Clear all market open prices (call at start of new trading day)."""
+    MARKET_OPEN_PRICES.clear()
+
+def is_market_open() -> bool:
+    """Check if market is currently open (after 9:30 AM)."""
+    now = datetime.now(pytz.timezone("America/New_York"))
+    return now.hour > 9 or (now.hour == 9 and now.minute >= 30)
+
+## -------------------------------------------------------------------
+## BLOCK: heartbeat-detection  |  FILE: src/scanner/scanner.py  |  DATE: 2025-10-03
+## PURPOSE: Detect if a ticker is "alive" (actively moving) vs stagnant
+## NOTES:
+##   - Adaptive window: 30min before 9:30 AM, 5min during 9:30-12:00, 30min after 12:00
+##   - Checks: price changed? volume growing? not frozen?
+## -------------------------------------------------------------------
+def get_scan_cadence_minutes() -> int:
+    """
+    Return dynamic scan cadence based on time of day.
+
+    Strategy:
+    - 4:00-9:00 AM: 30 min (early premarket, slower)
+    - 9:00-9:15 AM: 15 min (pre-open ramp up)
+    - 9:15-9:30 AM: 5 min (final approach to open)
+    - 9:30+ AM: 5 min (market hours)
+    """
+    now = datetime.now(pytz.timezone("America/New_York"))
+    hour, minute = now.hour, now.minute
+
+    # 4:00-9:00 AM: 30 minute cadence
+    if hour < 9:
+        return 30
+    # 9:00-9:15 AM: 15 minute cadence
+    elif hour == 9 and minute < 15:
+        return 15
+    # 9:15+ AM: 5 minute cadence
+    else:
+        return 5
+
+def get_heartbeat_window_minutes() -> int:
+    """
+    Return adaptive heartbeat window based on time of day.
+
+    Strategy:
+    - Before 9:30: 30min (premarket, slower)
+    - 9:30-12:00: 5min (opening volatility, catch fast movers)
+    - 12:00-4:00: 30min (afternoon, slower/less volume)
+    """
+    now = datetime.now(pytz.timezone("America/New_York"))
+    hour, minute = now.hour, now.minute
+
+    # Before 9:30 AM: 30 minute window (premarket)
+    if hour < 9 or (hour == 9 and minute < 30):
+        return 30
+    # 9:30 AM - 12:00 PM: 5 minute window (TIGHT - opening volatility)
+    elif hour < 12:
+        return 5
+    # 12:00 PM - 4:00 PM: 30 minute window (RELAXED - afternoon doldrums)
+    else:
+        return 30
+
+def has_heartbeat(ticker: str, min_price_change_pct: float = 0.5, min_volume_growth: int = 1000) -> tuple[bool, str]:
+    """
+    Check if ticker has a "heartbeat" (active movement).
+
+    AFTER MARKET OPEN (9:30 AM+):
+        Uses (current_price - market_open_price) to detect intraday movers
+
+    BEFORE MARKET OPEN (premarket):
+        Uses (current_price - last_scan_price) for relative movement
+
+    Returns:
+        (has_heartbeat: bool, reason: str)
+    """
+    history = get_snapshot_history(ticker)
+
+    # Allow pass-through on first scan (no history yet)
+    if len(history) < 2:
+        return True, "first_scan_pass"
+
+    # Get adaptive window
+    window_minutes = get_heartbeat_window_minutes()
+    now = datetime.now(pytz.timezone("America/New_York"))
+    cutoff_time = now - timedelta(minutes=window_minutes)
+
+    # Filter snapshots within the window
+    recent = [s for s in history if s[0] >= cutoff_time]
+
+    if len(recent) < 2:
+        # Fallback: if window is tight (5 min) and we have ANY history, use it
+        # This handles market open transition when we only have premarket 30-min data
+        if window_minutes <= 5 and len(history) >= 2:
+            recent = history[-2:]  # Use last 2 snapshots regardless of time
+        else:
+            return False, f"no_data_in_last_{window_minutes}min"
+
+    # Check 1: Price movement
+    # CRITICAL FIX: Use market open price (9:30 AM) as reference if available
+    market_open_price = get_market_open_price(ticker)
+    newest_price = recent[-1][1]
+
+    if is_market_open() and market_open_price is not None:
+        # After 9:30 AM: Calculate change from market open
+        reference_price = market_open_price
+        reference_label = "open_930"
+    else:
+        # Before 9:30 AM (premarket): Use oldest in window
+        reference_price = recent[0][1]
+        reference_label = f"last_{window_minutes}min"
+
+    if reference_price <= 0:
+        return False, "invalid_price"
+
+    price_change_pct = (newest_price - reference_price) / reference_price * 100.0  # Signed (can be negative)
+
+    # Check 2: Volume growth
+    oldest_volume = recent[0][2]
+    newest_volume = recent[-1][2]
+    volume_growth = newest_volume - oldest_volume
+
+    # Check 3: Not frozen (price identical for all recent snapshots)
+    unique_prices = set(s[1] for s in recent)
+    is_frozen = len(unique_prices) == 1
+
+    # Heartbeat criteria (MUST BE UPWARD MOVEMENT)
+    if is_frozen:
+        return False, "price_frozen"
+
+    # Require UPWARD price movement (filter out downtrending stocks like TSPH)
+    if price_change_pct < 0:
+        return False, f"downtrending_vs_{reference_label}"
+
+    # Require minimum upward movement OR volume growth
+    if price_change_pct < min_price_change_pct and volume_growth < min_volume_growth:
+        return False, f"insufficient_movement_vs_{reference_label}"
+
+    # Return success with reference label (shows what price we compared against)
+    return True, f"active_vs_{reference_label}"
+
+## -------------------------------------------------------------------
+## BLOCK: composite-scoring  |  FILE: src/scanner/scanner.py  |  DATE: 2025-10-01
+## PURPOSE: Multi-factor scoring for Top 5 (replaces simple gap% sort)
+## FORMULA:
+##   score = (gap_pct * decay_weight)
+##         + (intraday_delta * delta_weight)
+##         + (volume_rate * volume_weight)
+##         + (rvol_trend * rvol_weight)
+##         + (velocity_bonus if price changed in last 30m)
+## -------------------------------------------------------------------
+def calculate_gap_decay_factor() -> float:
+    """Gap% loses weight as session progresses (10% per hour after open)."""
+    ny = pytz.timezone("America/New_York")
+    now = datetime.now(ny)
+    market_open = ny.localize(datetime.combine(now.date(), datetime.strptime("09:30", "%H:%M").time()))
+
+    if now < market_open:
+        return 1.0  # Full weight premarket
+
+    hours_since_open = (now - market_open).seconds / 3600.0
+    decay_factor = max(0.4, 1.0 - (hours_since_open * 0.1))  # Min 40% weight
+    return decay_factor
+
+def calculate_intraday_delta(ticker: str, window_minutes: int = 30) -> float:
+    """Calculate % price change in last N minutes."""
+    history = get_snapshot_history(ticker)
+    if len(history) < 2:
+        return 0.0
+
+    now = datetime.now(pytz.timezone("America/New_York"))
+    cutoff_time = now - timedelta(minutes=window_minutes)
+
+    recent = [s for s in history if s[0] >= cutoff_time]
+    if len(recent) < 2:
+        return 0.0
+
+    old_price = recent[0][1]
+    new_price = recent[-1][1]
+
+    if old_price <= 0:
+        return 0.0
+
+    return (new_price - old_price) / old_price * 100.0
+
+def calculate_volume_rate(ticker: str, window_minutes: int = 30) -> float:
+    """Calculate shares/minute in last N minutes."""
+    history = get_snapshot_history(ticker)
+    if len(history) < 2:
+        return 0.0
+
+    now = datetime.now(pytz.timezone("America/New_York"))
+    cutoff_time = now - timedelta(minutes=window_minutes)
+
+    recent = [s for s in history if s[0] >= cutoff_time]
+    if len(recent) < 2:
+        return 0.0
+
+    old_volume = recent[0][2]
+    new_volume = recent[-1][2]
+    volume_delta = new_volume - old_volume
+
+    if volume_delta <= 0:
+        return 0.0
+
+    # Shares per minute
+    time_elapsed_minutes = (recent[-1][0] - recent[0][0]).seconds / 60.0
+    if time_elapsed_minutes <= 0:
+        return 0.0
+
+    return volume_delta / time_elapsed_minutes
+
+def calculate_composite_score(ticker: str, gap_pct: float, current_price: float, current_volume: int) -> float:
+    """
+    Calculate composite score for Top 5 ranking.
+
+    Weights (updated 2025-10-03 to catch high-volume runners like DFLI):
+    - gap_pct * decay: 20% (reduced from 25% - gap alone not enough)
+    - intraday_delta: 30%
+    - volume_score: 30% (increased from 25% - volume matters!)
+    - velocity_bonus: 20 points
+    """
+    # Time decay on gap
+    decay_factor = calculate_gap_decay_factor()
+    gap_score = gap_pct * decay_factor * 0.20
+
+    # Intraday price movement
+    intraday_delta = calculate_intraday_delta(ticker, window_minutes=30)
+    delta_score = intraday_delta * 0.30
+
+    # Volume scoring (two components: rate + absolute)
+    volume_rate = calculate_volume_rate(ticker, window_minutes=30)
+    rate_score = (volume_rate / 1000.0) * 0.15
+
+    # Absolute volume bonus (rewards high volume even on first scan)
+    # Scale: 1M vol = 1 point, 100M vol = 10 points, 500M vol = 15 points (logarithmic)
+    import math
+    volume_millions = current_volume / 1_000_000.0
+    abs_vol_score = min(math.log10(max(volume_millions, 0.1)) * 5.0, 15.0) if volume_millions > 0 else 0
+
+    vol_score = rate_score + abs_vol_score
+
+    # Velocity bonus: did price change recently?
+    has_pulse, _ = has_heartbeat(ticker, min_price_change_pct=0.5, min_volume_growth=1000)
+    velocity_bonus = 20.0 if has_pulse else 0.0
+
+    composite = gap_score + delta_score + vol_score + velocity_bonus
+
+    return composite
+
+## -------------------------------------------------------------------
+## BLOCK: deficient-ticker-filter  |  FILE: src/scanner/scanner.py  |  DATE: 2025-10-03
+## PURPOSE: Fast filter for non-tradeable tickers (suffix-based only)
+## NOTES:
+##   - Deficient stocks filtered by $1.00 minimum price in liquidity config
+##   - This only checks for rights, warrants, units, etc.
+## -------------------------------------------------------------------
+def is_ticker_tradeable_fast(ticker: str) -> tuple[bool, str]:
+    """
+    Fast check if ticker is tradeable (suffix-based filter only).
+
+    Returns:
+        (is_tradeable: bool, reason: str)
+    """
+    ticker_upper = ticker.upper()
+
+    # Check specific suffix patterns (must be specific to avoid false positives like MSTR)
+    # Rights: typically single letter + R (e.g., BAYAR = BAYA + R)
+    if len(ticker_upper) >= 5 and ticker_upper[-1] == 'R' and ticker_upper[-2].isalpha():
+        # Check if it's a known legitimate ticker ending in R
+        legitimate_r_tickers = {'MSTR', 'TIGR', 'UBER', 'HEAR', 'FSLR', 'SOTR', 'CHTR'}
+        if ticker_upper not in legitimate_r_tickers:
+            # Could be a rights offering (e.g., BAYAR)
+            # But only flag if ticker base + R pattern (conservative)
+            pass  # Allow through for now - too many false positives
+
+    # Multi-letter suffixes (more specific)
+    if ticker_upper.endswith('WS'):  # Warrants
+        return False, "suffix_WS"
+    if ticker_upper.endswith('.W'):  # Warrants (dot notation)
+        return False, "suffix_.W"
+
+    # Single letter suffixes at end (after 4+ letter base)
+    if len(ticker_upper) >= 5:
+        last_char = ticker_upper[-1]
+        # Only flag if last char is one of these AND it's clearly a derivative
+        if last_char in ('W', 'U', 'Z', 'Q', 'E') and ticker_upper[-2].isalpha():
+            return False, f"suffix_{last_char}"
+
+    return True, "tradeable"
 
 ## -------------------------------------------------------------------
 ## BLOCK: dated-logger  |  FILE: src/scanner/scanner.py  |  DATE: 2025-09-29
@@ -154,7 +507,15 @@ def prefilter_top_gappers(snaps: list[dict], n: int = 100, min_price: float = 1.
     pool = []
     skipped_missing = 0
     skipped_price   = 0
+    skipped_suffix  = 0
     for s in snaps or []:
+        ticker = s.get("ticker", "")
+        # Filter out non-tradeable: OTC (F), warrants (W), ADRs (Y), units (U), preferreds (PS/AS/WS/RS)
+        excluded_endings = ("F", "W", "Y", "U", "PS", "AS", "WS", "RS")
+        if ticker and any(ticker.endswith(suffix) for suffix in excluded_endings):
+            skipped_suffix += 1
+            continue
+
         # choose a price: last_price (preferred), else close
         last = s.get("last_price")
         close = s.get("close")
@@ -192,7 +553,7 @@ def prefilter_top_gappers(snaps: list[dict], n: int = 100, min_price: float = 1.
     try:
         logger = logging.getLogger("scanner")
         if not pool:
-            logger.info(f"ℹ️ [Open] Prefilter diagnostics: skipped_missing={skipped_missing}, skipped_price={skipped_price}")
+            logger.info(f"ℹ️ [Open] Prefilter diagnostics: skipped_missing={skipped_missing}, skipped_price={skipped_price}, skipped_suffix={skipped_suffix}")
     except Exception:
         pass
 
@@ -231,7 +592,10 @@ def _fmt_vol(v):
         return "0"
 
 def log_group_watchlist(cfg: dict, snaps: list[dict], logger: logging.Logger) -> None:
-    symbols = (cfg.get("group_watchlist") or [])
+    # Load from CSV first, fallback to YAML if CSV doesn't exist
+    symbols = load_group_watchlist()
+    if not symbols:
+        symbols = (cfg.get("group_watchlist") or [])
     if not symbols:
         return
 
@@ -254,12 +618,34 @@ def log_group_watchlist(cfg: dict, snaps: list[dict], logger: logging.Logger) ->
         prev  = s.get("prev_close")
         price = last if last not in (None, 0) else close
 
-        gap_str = _fmt_gap(price, prev) if (price and prev) else "n/a"
+        # Record market open price on first scan after 9:30
+        if price and is_market_open():
+            try:
+                record_market_open_price(sym, float(price))
+            except:
+                pass
+
+        # Calculate gap: use market open price if available (after 9:30), else prev_close
+        open_price = get_market_open_price(sym)
+        if open_price is not None:
+            # Intraday change from market open
+            ref_price = open_price
+            gap_label = "chg"  # "change from open" instead of "gap"
+        else:
+            # Premarket gap from yesterday's close
+            ref_price = prev
+            gap_label = "gap"
+
+        gap_str = _fmt_gap(price, ref_price) if (price and ref_price) else "n/a"
         last_str = _fmt_num(price, 2)
-        prev_str = _fmt_num(prev, 2)
+        ref_str = _fmt_num(ref_price, 2)
         vol_str  = _fmt_vol(s.get("volume"))
 
-        logger.info(f"   {sym}: gap={gap_str} last={last_str} prev={prev_str} vol={vol_str}")
+        # Check if ticker is deficient and add [D] tag
+        is_tradeable, reason = is_ticker_tradeable_fast(sym)
+        deficient_tag = "" if is_tradeable else " [D]"
+
+        logger.info(f"   {sym}{deficient_tag}: {gap_label}={gap_str} last={last_str} open={ref_str} vol={vol_str}")
 
 # -------------------------------------------------------------------
 # CSV bootstrap / append
@@ -578,10 +964,13 @@ def run_once(cfg: dict, logger: logging.Logger, force_final_pick: bool = False) 
         logger.warning(f"[GROUP] failed to log watchlist: {e}")
 
 
-    # --- NEW: Premarket short-circuit ---
+    # --- NEW: Premarket/Postmarket short-circuit ---
     ny = pytz.timezone("America/New_York")
     now_et = datetime.now(ny)
-    if now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30):
+    is_premarket = now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+    is_postmarket = now_et.hour >= 16 and now_et.hour < 20
+
+    if is_premarket or is_postmarket:
         # Just compute raw %Gap from bulk feed
         def _best_price_from_snapshot(s: dict):
             # Order matters: last_price (extended ok) → day.c → day.o → day.h → day.l
@@ -598,26 +987,85 @@ def run_once(cfg: dict, logger: logging.Logger, force_final_pick: bool = False) 
 
         top = []
         for s in snaps or []:
+            ticker = s.get("ticker", "")
+            # Filter out non-tradeable: OTC (F), warrants (W), ADRs (Y), units (U), preferreds (PS/AS/WS/RS)
+            excluded_endings = ("F", "W", "Y", "U", "PS", "AS", "WS", "RS")
+            if ticker and any(ticker.endswith(suffix) for suffix in excluded_endings):
+                continue
+
+            # Filter: require minimum volume to confirm actual premarket trading
+            vol = s.get("volume", 0)
+            try:
+                vol = int(vol) if vol else 0
+            except Exception:
+                vol = 0
+            # Require at least 10K shares traded (filters stale/no-trading tickers)
+            if vol < 10000:
+                continue
+
             prev = s.get("prev_close")
             price = _best_price_from_snapshot(s)
             try:
                 prev = float(prev) if prev is not None else None
             except Exception:
                 prev = None
-            if price is None or prev is None or prev <= 0:
+            # Filter: require both price >= $1.00 AND prev_close >= $1.00 (NASDAQ compliance)
+            if price is None or prev is None or price < 1.0 or prev < 1.0:
                 continue
             try:
                 gap = (price - prev) / prev * 100.0
-                top.append((s.get("ticker", ""), gap))
+                # Record snapshot to history (for next iteration)
+                record_snapshot(ticker, price, vol)
+                top.append((ticker, gap, price, prev, vol))
             except Exception:
                 continue
 
+        top.sort(key=lambda x: x[1], reverse=True)
+        top5 = top[:5]
 
+        session_label = "Premarket" if is_premarket else "Postmarket"
 
-        if top5:
-            pretty = ", ".join([f"{t} ({g:+.1f}%)" for t, g in top5])
-            logger.info(f"🏁 Premarket Top 5 by %Gap: {pretty}")
-            return  # 👈 exit early, normal case
+        # Composite scoring with heartbeat filter (filters out stale tickers)
+        logger.info(f"🏁 [{session_label}] Top 5 by Composite Score:")
+        scored_candidates = []
+        for ticker, gap_pct, price, prev, vol in top:
+            # Check 1: Tradeability (suffix-based filter + NASDAQ deficiency rule)
+            is_tradeable, trade_reason = is_ticker_tradeable_fast(ticker)
+            if not is_tradeable:
+                continue  # Skip non-tradeable tickers (silent filter)
+
+            # Check 2: Heartbeat (is it moving?)
+            has_pulse, reason = has_heartbeat(ticker, min_price_change_pct=0.5, min_volume_growth=1000)
+            if not has_pulse:
+                logger.debug(f"   ❌ {ticker} FILTERED: {reason}")
+                continue  # Skip stale tickers
+
+            # Calculate composite score
+            score = calculate_composite_score(ticker, gap_pct, price, vol)
+            scored_candidates.append({
+                'ticker': ticker,
+                'score': score,
+                'gap_pct': gap_pct,
+                'price': price,
+                'prev': prev,
+                'volume': vol,
+                'heartbeat': reason
+            })
+
+        scored_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+        if scored_candidates:
+            for item in scored_candidates[:5]:
+                gap_str = _fmt_gap(item['price'], item['prev'])
+                last_str = _fmt_num(item['price'], 2)
+                prev_str = _fmt_num(item['prev'], 2)
+                vol_str = _fmt_vol(item['volume'])
+                score_str = f"{item['score']:.1f}"
+                logger.info(f"   {item['ticker']}: score={score_str} gap={gap_str} last={last_str} prev={prev_str} vol={vol_str} [{item['heartbeat']}]")
+        else:
+            logger.info(f"   (No active tickers with heartbeat - all are stale/frozen)")
+
+        return  # 👈 exit early, normal case
 
         # -------------------------------------------------------------------
         # PATCH: premarket-fallback | FILE: src/scanner/scanner.py
@@ -626,6 +1074,22 @@ def run_once(cfg: dict, logger: logging.Logger, force_final_pick: bool = False) 
         # -------------------------------------------------------------------
         fallback = []
         for s in snaps or []:
+            ticker = s.get("ticker", "")
+            # Filter out non-tradeable: OTC (F), warrants (W), ADRs (Y), units (U), preferreds (PS/AS/WS/RS)
+            excluded_endings = ("F", "W", "Y", "U", "PS", "AS", "WS", "RS")
+            if ticker and any(ticker.endswith(suffix) for suffix in excluded_endings):
+                continue
+
+            # Filter: require minimum volume to confirm actual premarket trading
+            vol = s.get("volume", 0)
+            try:
+                vol = int(vol) if vol else 0
+            except Exception:
+                vol = 0
+            # Require at least 10K shares traded (filters stale/no-trading tickers)
+            if vol < 10000:
+                continue
+
             # pick best available price
             price = None
             for k in ("last_price", "close", "open", "high", "low"):
@@ -644,254 +1108,38 @@ def run_once(cfg: dict, logger: logging.Logger, force_final_pick: bool = False) 
             except Exception:
                 prev = None
 
-            if price is None or prev is None or prev <= 0:
+            # Filter: require prev >= $0.10 to avoid garbage data (but allow penny stocks)
+            if price is None or prev is None or prev < 0.10:
                 continue
             try:
                 gap = (price - prev) / prev * 100.0
-                fallback.append((s.get("ticker", ""), gap))
+                # Record snapshot to history
+                record_snapshot(ticker, price, vol)
+                fallback.append((ticker, gap, price, prev, vol))
             except Exception:
                 continue
 
         fallback.sort(key=lambda x: x[1], reverse=True)
         top5_fallback = fallback[:5]
         if top5_fallback:
-            pretty = ", ".join([f"{t} ({g:+.1f}%)" for t, g in top5_fallback])
-            logger.info(f"🏁 [Fallback] Premarket Top 5 by %Gap: {pretty}")
+            logger.info(f"🏁 [Fallback-{session_label}] Top 5 by %Gap:")
+            for t, g, price, prev, vol in top5_fallback:
+                gap_str = _fmt_gap(price, prev)
+                last_str = _fmt_num(price, 2)
+                prev_str = _fmt_num(prev, 2)
+                vol_str = _fmt_vol(vol)
+                logger.info(f"   {t}: gap={gap_str} last={last_str} prev={prev_str} vol={vol_str}")
         else:
-            logger.info("🏁 [Fallback] Premarket Top 5 by %Gap: (still empty)")
+            logger.info(f"🏁 [Fallback-{session_label}] Top 5 by %Gap: (still empty)")
         return  # 👈 always exit after logging
-
-
-
-
-
-    ## -------------------------------------------------------------------
-    ## BLOCK: hybrid-snapshot-enrich  |  FILE: src/scanner/scanner.py  |  DATE: 2025-09-30
-    ## PURPOSE: Combine fast fetch_snapshots() with per-ticker snapshots for top movers
-    ## NOTES:
-    ##   - Keeps performance (bulk scan of 11k+)
-    ##   - Restores premarket coverage with Polygon per-ticker snapshot (lastTrade)
-    ##   - Replaces `snaps` with enriched list for downstream logic
-    ## -------------------------------------------------------------------
-    rough = []
-    for s in snaps:
-        sym = s.get("ticker")
-        prev = s.get("prev_close") or 0
-        last = s.get("last_price") or 0
-        if prev > 0 and last:
-            rough_gap = (last - prev) / prev * 100.0
-        else:
-            rough_gap = 0
-        rough.append((rough_gap, sym, prev, last))
-
-    # Sort by rough gap and take top 500 for enrichment
-    rough.sort(key=lambda r: r[0], reverse=True)
-    top_syms = [sym for _, sym, _, _ in rough[:50]]
-
-    logger.info(f"[HYBRID] Enriching top {len(top_syms)} tickers with per-ticker snapshots")
-
-    enriched = []
-    for sym in top_syms:
-        try:
-            snap = pa.get_snapshot(sym)  # per-ticker snapshot (extended hours included)
-            prev = snap.get("prevDay", {}).get("close")
-            pre  = snap.get("lastTrade", {}).get("p")
-            if prev and pre:
-                gap = (pre - prev) / prev * 100.0
-                enriched.append({
-                    "ticker": sym,
-                    "gap_percent": gap,
-                    "premarket_price": pre,
-                    "prev_close": prev
-                })
-        except Exception as e:
-            logger.warning(f"[HYBRID] Failed per-ticker snapshot for {sym}: {e}")
-
-    # Replace snaps for downstream processing
-    snaps = enriched
-
-    logger.info("[HYBRID] Top 5 enriched gappers:")
-    for s in snaps[:5]:
-        logger.info(f"   {s['ticker']}: {s['premarket_price']} vs {s['prev_close']} gap={s['gap_percent']:.2f}%")
-    ## -------------------------------------------------------------------
-    ## END BLOCK: hybrid-snapshot-enrich
-    ## -------------------------------------------------------------------
-        
-
-    # -------------------------------------------------------------------
-    # BLOCK: gap-sanity-locals  |  FILE: src/scanner/scanner.py  |  DATE: 2025-09-30
-    # PURPOSE: List available local variable names to locate snapshot universe
-    # -------------------------------------------------------------------
-    try:
-        logger.info(f"[GAP-SANITY] Locals keys: {list(locals().keys())}")
-    except Exception as e:
-        logger.warning(f"[GAP-SANITY] Error listing locals: {e}")
-
-
-    # -------------------------------------------------------------------
-    # BLOCK: gap-sanity-lite  |  FILE: src/scanner/scanner.py  |  DATE: 2025-09-30
-    # PURPOSE: Quick check: show first 2 entries from snaps (premarket feed)
-    # -------------------------------------------------------------------
-    try:
-        logger.info(f"[GAP-SANITY] Type of snaps: {type(snaps)}")
-        logger.info(f"[GAP-SANITY] Raw dump of first 2 snaps: {snaps[:2]}")
-    except Exception as e:
-        logger.warning(f"[GAP-SANITY] Error accessing snaps: {e}")
-
-
-
-    # -------------------------------------------------------------------
-    # BLOCK: debug-gap-sanity  |  FILE: src/scanner/scanner.py  |  DATE: 2025-09-30
-    # PURPOSE: Log raw top gap leaders BEFORE filters to diagnose "(no candidates)"
-    # ANCHOR: place right AFTER the "📡 Snapshots fetched:" log
-    # NOTES:
-    #   - Zero-impact: only runs when configs/scanner.yaml -> debug.enable = true
-    #   - Auto-detects common universe variable names to avoid code churn
-    # -------------------------------------------------------------------
-    if cfg.get("debug", {}).get("enable"):
-        try:
-            _lx = locals()
-            universe = (_lx.get("snapshots")
-                        or _lx.get("all_tickers")
-                        or _lx.get("universe")
-                        or _lx.get("tickers"))
-            if not universe:
-                logger.warning("[DEBUG] Could not find universe list; expected one of: snapshots, all_tickers, universe, tickers")
-            else:
-                def _get(o, *names):
-                    if isinstance(o, dict):
-                        for n in names:
-                            if n in o:
-                                return o[n]
-                    for n in names:
-                        v = getattr(o, n, None)
-                        if v is not None:
-                            return v
-                    return None
-
-                def _to_f(x):
-                    try:
-                        return float(x)
-                    except Exception:
-                        return None
-
-                rows = []
-                for o in universe:
-                    sym = _get(o, "symbol", "ticker", "sym")
-                    prev = _to_f(_get(o, "prev_close", "previousClose", "prevClose", "close_yesterday"))
-                    pre  = _to_f(_get(o, "premarket_price", "pre", "pre_market_price", "preMarketPrice", "last", "price"))
-                    gap  = _get(o, "gap_percent", "gap", "gapPct")
-                    gap  = _to_f(gap)
-                    if gap is None and prev and pre and prev > 0:
-                        gap = (pre - prev) / prev * 100.0
-                    adv  = _to_f(_get(o, "avg_daily_volume", "avgVolume", "average_volume"))
-                    sh   = _to_f(_get(o, "intraday_shares", "shares", "volume"))
-                    dvol = _to_f(_get(o, "dollar_volume", "dollarVol", "dvol"))
-
-                    # Only keep rows where we have some gap value
-                    if gap is not None:
-                        rows.append((gap, sym, pre, prev, sh, adv, dvol))
-
-                if rows:
-                    rows.sort(key=lambda r: r[0], reverse=True)
-                    logger.info("[DEBUG] Raw top 10 by gap%% (pre-filters; computed if missing):")
-                    for gap, sym, pre, prev, sh, adv, dvol in rows[:10]:
-                        logger.info(f"   {sym}: gap={gap:.2f}% pre={pre} prev={prev} sh={sh} adv={adv} $vol={dvol}")
-                else:
-                    logger.info("[DEBUG] No rows with computable gap%% (premarket price / prev_close missing?)")
-        except Exception as e:
-            logger.exception(f"[DEBUG] gap-sanity block error: {e}")
-    # -------------------------------------------------------------------
-
-
-    # PREMARKET BRANCH: log Top-5 by %Gap only, skip enrichment/filters
-    ny = pytz.timezone("America/New_York")
-    now_et = datetime.now(ny)
-    is_premarket = (now_et.hour < 9) or (now_et.hour == 9 and now_et.minute < 30)
-    if is_premarket:
-        # compute %Gap from snapshot fields only
-        top = []
-        for s in snaps:
-            last = s.get("last_price")
-            prev = s.get("prev_close")
-            if last and prev and prev > 0:
-                try:
-                    gap = (float(last) - float(prev)) / float(prev) * 100.0
-                    top.append((s.get("ticker", ""), gap))
-                except Exception:
-                    continue
-
-        top.sort(key=lambda x: x[1], reverse=True)
-        top5 = top[:5]
-        if logger:
-            if top5:
-                pretty = ", ".join([f"{t} ({g:+.1f}%)" for t, g in top5])
-                logger.info(f"🏁 Premarket Top 5 by %Gap: {pretty}")
-            else:
-                logger.info("🏁 Premarket Top 5 by %Gap: (no candidates)")
-
-        return  # IMPORTANT: no enrichment/filters in premarket
-
-    try:
-        enriched = enrich_rows(snaps, today) if snaps else []
-        if logger:
-            logger.info(f"🧪 Enrichment produced {len(enriched)} rows")
-    except Exception as e:
-        logger.error(f"❌ Enrichment failed: {e}", exc_info=True)
-        enriched = []
-
-    try:
-        filtered = apply_liquidity_filters(enriched, cfg, logger) if enriched else []
-        if logger:
-            logger.info(
-                f"💧 Liquidity result: {len(filtered)} passed out of {len(enriched)}"
-            )
-    except Exception as e:
-        logger.error(f"❌ Liquidity filter failed: {e}", exc_info=True)
-        filtered = []
-
-    # PATCH: pass full cfg, not cfg["liquidity"]
-    filtered = apply_liquidity_filters(enriched, cfg, logger) if enriched else []
-
-    if not filtered:
-        logger.warning(
-            "No tickers passed liquidity filters — skipping scoring/final pick."
-        )
-        return
-
-    # Score + log movers
-    scored = score_snapshots(filtered)
-    log_top_movers(scored, n=5)
-
-    # Watchlist
-    write_watchlist(cfg["output"]["watchlist"], scored[:5], cfg["targets"])
-
-    # Final pick decision
-    do_final = force_final_pick or is_final_pick_time()
-    if not do_final:
-        return
-
-    winner = _pick_winner(scored)
-    if not winner:
-        logger.warning("⚠️ No winner after scoring.")
-        return
-
-    row = _final_pick_row(
-        winner,
-        score=winner.get("score", ""),
-        final=True,
-        rationale="",
-    )
-    append_row(row, cfg)
-    logger.info(f"[PRE] 📌 Final Pick: {row['ticker']} (score={row['score']})")
 
 ## -------------------------------------------------------------------
 ## BLOCK: open-selection-pass  |  FILE: src/scanner/scanner.py
 ## PURPOSE: One pass after 09:30 — enrich candidates, filter, score, write Pick of the Day
 ## -------------------------------------------------------------------
-def run_open_selection_once(cfg: dict, logger: logging.Logger) -> None:
-    # Only act inside the configured window
-    if not within_open_selection_window(cfg):
+def run_open_selection_once(cfg: dict, logger: logging.Logger, force: bool = False) -> None:
+    # Only act inside the configured window (unless forced by fallback)
+    if not force and not within_open_selection_window(cfg):
         logger.info("Open selection window not active — skipping open selection pass.")
         return
 
@@ -908,7 +1156,8 @@ def run_open_selection_once(cfg: dict, logger: logging.Logger) -> None:
 
     # Candidate pool (Top-N by %Gap from snapshots)
     pool_n = int((cfg.get("open_selection", {}) or {}).get("candidate_pool_size", 100))
-    candidates = prefilter_top_gappers(snaps, n=pool_n, min_price=1.0)
+    # Use min_price=0.25 to match liquidity.regular.min_price config
+    candidates = prefilter_top_gappers(snaps, n=pool_n, min_price=0.25)
     logger.info(f"⚡ [Open] Candidate pool from snapshots (Top {pool_n} by %Gap): {len(candidates)}")
 
     if not candidates:
@@ -937,17 +1186,29 @@ def run_open_selection_once(cfg: dict, logger: logging.Logger) -> None:
         return
 
     # -------------------------------------------------------------------
-    # BLOCK: open-scoring-with-fallback  |  DATE: 2025-09-29
+    # BLOCK: open-scoring-with-fallback  |  DATE: 2025-10-01
     # PURPOSE: Robust scoring + CSV write with timing and fallback pick
+    # FIX: Convert list to dict before passing to score_snapshots
     # -------------------------------------------------------------------
     try:
         t0 = time.time()
-        scored = score_snapshots(filtered)
+        # Convert filtered list to dict {ticker: data} for scoring
+        filtered_dict = {r.get('ticker'): r for r in filtered if r.get('ticker')}
+        scored = score_snapshots(filtered_dict)
         dt = time.time() - t0
         logger.info(f"🏎️ [Open] Scoring completed in {dt:.2f}s for {len(filtered)} candidates")
 
         # Log top-5 (by score) for visibility
         log_top_movers(scored, n=5)
+
+        # Log top 3 candidates for manual review (in case #1 is not tradeable)
+        logger.info("🎯 [Open] Top 3 Candidates for Pick of the Day:")
+        for i, candidate in enumerate(scored[:3], 1):
+            ticker = candidate.get('ticker', 'N/A')
+            score = candidate.get('score', 0)
+            gap = candidate.get('gap_pct', 0)
+            rvol = candidate.get('rvol', 0)
+            logger.info(f"  #{i}: {ticker} - score={score:.1f}, gap={gap:.1f}%, rvol={rvol:.1f}x")
 
         winner = _pick_winner(scored)
         if not winner:
@@ -1004,10 +1265,14 @@ def run_open_selection_once(cfg: dict, logger: logging.Logger) -> None:
 def run() -> None:
     cfg = load_config()
     logger = setup_logger(cfg["output"]["log"])
-    cadence = int(cfg["premarket"]["cadence_minutes"])
 
     # Always reset/seed today_pick with the template at process start
     ensure_today_pick_ready(cfg, reset=True)
+
+    # Clear snapshot history from previous run (new trading day)
+    clear_snapshot_history()
+    logger.info("📝 Snapshot history cleared for new trading day")
+
     logger.info("Starting premarket scanner loop...")
 
     while within_premarket_window(cfg):
@@ -1015,12 +1280,169 @@ def run() -> None:
             run_once(cfg, logger, force_final_pick=False)
         except Exception as e:
             logger.error(f"❌ Error during scan tick: {e}", exc_info=True)
+
+        # Dynamic cadence: 30min → 15min → 5min as we approach open
+        cadence = get_scan_cadence_minutes()
+        logger.info(f"⏱️ Next scan in {cadence} minutes")
         time.sleep(cadence * 60)
 
     logger.info("Premarket window closed.")
 
-    # Single open-selection pass (09:30–09:35 ET)
-    run_open_selection_once(cfg, logger)
+    # Wait until 9:15 AM to start active monitoring
+    ny = pytz.timezone("America/New_York")
+    while datetime.now(ny).hour < 9 or (datetime.now(ny).hour == 9 and datetime.now(ny).minute < 15):
+        logger.info("⏳ Waiting for 9:15 AM to start active monitoring...")
+        time.sleep(60)  # Check every minute
+
+    logger.info("🔍 9:15 AM - Starting active watchlist monitoring (5-min cadence)...")
+    pick_made = False
+
+    while True:
+        now = datetime.now(pytz.timezone("America/New_York"))
+
+        # Fallback: if we missed the selection window (started late), force pick now
+        if not pick_made:
+            # Check if we're past the selection window
+            sel_window = (cfg.get("open_selection", {}) or {}).get("selection_window", "09:30-09:35")
+            try:
+                _, end_s = sel_window.split("-")
+                end_t = datetime.strptime(end_s.strip(), "%H:%M").time()
+            except Exception:
+                end_t = datetime.strptime("09:35", "%H:%M").time()
+
+            end_dt = pytz.timezone("America/New_York").localize(datetime.combine(now.date(), end_t))
+
+            # If we're past 09:35 and haven't made a pick yet, force it now
+            if now > end_dt:
+                logger.warning(f"⚠️ Missed selection window (ended {end_t.strftime('%H:%M')} ET). Forcing immediate pick at {now.strftime('%H:%M')} ET.")
+                try:
+                    run_open_selection_once(cfg, logger, force=True)  # FORCE bypass window check
+                    pick_made = True
+                    logger.info("📊 Late pick completed. Continuing to monitor through market close...")
+                except Exception as e:
+                    logger.error(f"❌ Failed to make fallback pick: {e}", exc_info=True)
+                    pick_made = True  # Prevent infinite retry
+
+        # Check if we're in selection window (normal path)
+        if within_open_selection_window(cfg) and not pick_made:
+            logger.info("✅ Selection window active, making pick...")
+            run_open_selection_once(cfg, logger)
+            pick_made = True
+            logger.info("📊 Continuing to monitor through market close...")
+
+        # Stop at market close (4:00 PM ET)
+        if now.hour >= 16:
+            logger.info("🔔 Market closed (4:00 PM ET)")
+            break
+
+        # Log watchlist + top 5 every 5 minutes
+        try:
+            snaps = fetch_snapshots(limit=50000)
+            logger.info(f"📡 Snapshot: {len(snaps)} tickers")
+
+            # Log watchlist
+            log_group_watchlist(cfg, snaps, logger)
+
+            # Record snapshots to history & calculate composite scores
+            logger.info("🏁 Top 5 (Composite Score - Heartbeat Active):")
+            scored_tickers = []
+
+            for s in snaps:
+                ticker = s.get("ticker", "")
+                excluded_endings = ("F", "W", "Y", "U", "PS", "AS", "WS", "RS")
+                if ticker and any(ticker.endswith(suffix) for suffix in excluded_endings):
+                    continue
+
+                vol = s.get("volume", 0)
+                try:
+                    vol = int(vol) if vol else 0
+                except Exception:
+                    vol = 0
+                if vol < 10000:
+                    continue
+
+                prev = s.get("prev_close")
+                price = s.get("last_price")
+                # Filter: require both price >= $1.00 AND prev_close >= $1.00 (NASDAQ compliance)
+                if price is None or prev is None:
+                    continue
+                try:
+                    price = float(price)
+                    prev = float(prev)
+                    if price < 1.0 or prev < 1.0:
+                        continue
+                except:
+                    continue
+
+                try:
+                    price_f = float(price)
+                    prev_f = float(prev)
+
+                    # Record market open price on first scan after 9:30
+                    if is_market_open():
+                        record_market_open_price(ticker, price_f)
+
+                    # Calculate gap: use market open price if available, else prev_close
+                    open_price = get_market_open_price(ticker)
+                    if open_price is not None:
+                        # Intraday % change from market open
+                        gap_pct = (price_f - open_price) / open_price * 100.0
+                    else:
+                        # Premarket gap from prev_close
+                        gap_pct = (price_f - prev_f) / prev_f * 100.0
+
+                    # Record snapshot to history
+                    record_snapshot(ticker, price_f, vol)
+
+                    # Check 1: Tradeability (suffix-based filter + NASDAQ deficiency rule)
+                    is_tradeable, trade_reason = is_ticker_tradeable_fast(ticker)
+                    if not is_tradeable:
+                        continue  # Skip non-tradeable tickers (silent filter)
+
+                    # Check 2: Heartbeat (is it moving?)
+                    has_pulse, reason = has_heartbeat(ticker, min_price_change_pct=0.5, min_volume_growth=1000)
+                    if not has_pulse:
+                        continue  # Skip stagnant tickers
+
+                    # Calculate composite score
+                    score = calculate_composite_score(ticker, gap_pct, price_f, vol)
+
+                    scored_tickers.append({
+                        'ticker': ticker,
+                        'score': score,
+                        'gap_pct': gap_pct,
+                        'price': price_f,
+                        'prev': prev_f,
+                        'open_price': open_price if open_price is not None else prev_f,  # Store reference price for logging
+                        'volume': vol,
+                        'heartbeat': reason
+                    })
+                except Exception:
+                    continue
+
+            # Sort by composite score
+            scored_tickers.sort(key=lambda x: x['score'], reverse=True)
+
+            # Log top 5
+            for item in scored_tickers[:5]:
+                ref_price = item['open_price']
+                is_intraday = (ref_price != item['prev'])  # Are we using open price or prev_close?
+                gap_label = "chg" if is_intraday else "gap"
+                ref_label = "open" if is_intraday else "prev"
+
+                gap_str = _fmt_gap(item['price'], ref_price)
+                last_str = _fmt_num(item['price'], 2)
+                ref_str = _fmt_num(ref_price, 2)
+                vol_str = _fmt_vol(item['volume'])
+                score_str = f"{item['score']:.1f}"
+                logger.info(f"   {item['ticker']}: score={score_str} {gap_label}={gap_str} last={last_str} {ref_label}={ref_str} vol={vol_str} [{item['heartbeat']}]")
+
+        except Exception as e:
+            logger.error(f"❌ Monitoring error: {e}")
+
+        # Dynamic cadence (will be 5 min during market hours)
+        cadence = get_scan_cadence_minutes()
+        time.sleep(cadence * 60)
 
     logger.info("Scanner stopped.")
 
