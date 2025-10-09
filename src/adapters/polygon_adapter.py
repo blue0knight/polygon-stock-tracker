@@ -49,260 +49,68 @@ def _today_ny() -> datetime:
     return datetime.now(pytz.timezone("America/New_York"))
 
 
-# -------------------------------------------------------------------
-# Ticker Status Check (filter delisted/deficient/OTC)
-# -------------------------------------------------------------------
-# Cache to avoid repeated API calls for same ticker
-_TRADEABLE_CACHE = {}
-_DEFICIENCY_CACHE = {}
-
-def is_deficient_nasdaq(ticker: str, lookback_days: int = 45, grace_period_days: int = 10) -> tuple[bool, str]:
-    """
-    Check if ticker is deficient based on NASDAQ $1 minimum bid price rule.
-
-    NASDAQ Rules:
-    - Stock below $1.00 for 30+ consecutive business days = deficient
-    - After deficiency, must maintain $1+ for grace_period_days to be considered compliant
-
-    Args:
-        ticker: Stock symbol
-        lookback_days: Days of history to check (default 45)
-        grace_period_days: Days stock must stay above $1 after deficiency to clear (default 10)
-
-    Returns:
-        (is_deficient: bool, reason: str)
-    """
-    # Check cache first
-    if ticker in _DEFICIENCY_CACHE:
-        return _DEFICIENCY_CACHE[ticker]
-
-    try:
-        api_key = _require_api_key()
-        end = datetime.utcnow().date()
-        start = end - timedelta(days=lookback_days)
-
-        url = f"{BASE_URL}/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}"
-        params = {"adjusted": "true", "sort": "asc", "limit": lookback_days, "apiKey": api_key}
-
-        with _session() as s:
-            resp = s.get(url, params=params, timeout=HTTP_TIMEOUT)
-            resp.raise_for_status()
-            bars = resp.json().get("results", []) or []
-
-        if len(bars) < 30:
-            # Not enough history, assume OK
-            result = (False, "insufficient_history")
-            _DEFICIENCY_CACHE[ticker] = result
-            return result
-
-        # Analyze price history from most recent to oldest
-        # State machine: compliant -> below_threshold -> deficient -> recovery -> compliant
-
-        consecutive_below = 0  # Current streak below $1
-        consecutive_above = 0  # Current streak above $1
-        was_deficient = False  # Found a deficiency period going backwards
-
-        for bar in reversed(bars):  # Most recent first
-            close = float(bar.get("c", 0) or 0)
-
-            if close < 1.0:
-                # Below threshold
-                consecutive_below += 1
-                consecutive_above = 0  # Reset above counter
-
-                # Check if currently deficient
-                if consecutive_below >= 30:
-                    result = (True, f"deficient_{consecutive_below}d_below_$1")
-                    _DEFICIENCY_CACHE[ticker] = result
-                    return result
-            else:
-                # Above threshold
-                if consecutive_below >= 30:
-                    # Found a deficiency period before current above-threshold streak
-                    was_deficient = True
-
-                consecutive_above += 1
-                consecutive_below = 0  # Reset below counter
-
-                # If we were deficient and are now above, check grace period
-                if was_deficient:
-                    if consecutive_above < grace_period_days:
-                        # In grace period - still considered deficient
-                        result = (True, f"grace_period_{consecutive_above}/{grace_period_days}d")
-                        _DEFICIENCY_CACHE[ticker] = result
-                        return result
-                    else:
-                        # Grace period complete - now compliant
-                        result = (False, "compliant_post_grace")
-                        _DEFICIENCY_CACHE[ticker] = result
-                        return result
-
-        # Never found deficiency
-        result = (False, "compliant")
-        _DEFICIENCY_CACHE[ticker] = result
-        return result
-
-    except Exception as e:
-        # On error, assume not deficient (don't filter out due to API issues)
-        result = (False, f"check_error")
-        _DEFICIENCY_CACHE[ticker] = result
-        return result
-
-def is_ticker_tradeable(ticker: str) -> tuple[bool, str]:
-    """
-    Check if ticker is tradeable (not delisted, deficient, or OTC).
-    Uses in-memory cache to avoid repeated API calls.
-
-    Returns:
-        (is_tradeable: bool, reason: str)
-    """
-    # Check cache first
-    if ticker in _TRADEABLE_CACHE:
-        return _TRADEABLE_CACHE[ticker]
-
-    api_key = _require_api_key()
-    url = f"{BASE_URL}/v3/reference/tickers/{ticker}"
-
-    try:
-        resp = requests.get(url, params={"apiKey": api_key}, timeout=HTTP_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if data.get("status") != "OK":
-            return False, "ticker_not_found"
-
-        results = data.get("results", {})
-
-        # Check market (must be stocks, not OTC)
-        market = results.get("market", "").lower()
-        if market == "otc":
-            result = (False, "otc_market")
-            _TRADEABLE_CACHE[ticker] = result
-            return result
-
-        # Check if active
-        active = results.get("active", False)
-        if not active:
-            result = (False, "inactive")
-            _TRADEABLE_CACHE[ticker] = result
-            return result
-
-        # Check type (must be common stock CS, not ADR/warrant/etc)
-        ticker_type = results.get("type", "").upper()
-        if ticker_type in ["ADRC", "WARRANT", "RIGHT", "UNIT"]:
-            result = (False, f"type_{ticker_type.lower()}")
-            _TRADEABLE_CACHE[ticker] = result
-            return result
-
-        # Check delisted flag
-        delisted = results.get("delisted_utc")
-        if delisted:
-            result = (False, "delisted")
-            _TRADEABLE_CACHE[ticker] = result
-            return result
-
-        result = (True, "tradeable")
-        _TRADEABLE_CACHE[ticker] = result
-        return result
-
-    except requests.Timeout:
-        # On timeout, assume tradeable (don't filter out due to API issues)
-        result = (True, "timeout_assume_ok")
-        _TRADEABLE_CACHE[ticker] = result
-        return result
-    except Exception as e:
-        # On error, assume tradeable (don't filter out due to API issues)
-        result = (True, f"error_assume_ok")
-        _TRADEABLE_CACHE[ticker] = result
-        return result
-
-
 # ------------------------- snapshots adapter --------------------------
 def fetch_snapshots(limit: int = 50) -> List[Dict[str, Any]]:
     """
-    Fetch latest snapshot data for US stocks from Polygon v3 API.
-    Supports premarket/extended hours pricing.
+    Fetch latest snapshot data for US stocks from Polygon.
     Returns a list of dicts with ticker + basic prices.
     """
     api_key = _require_api_key()
-    url = f"{BASE_URL}/v3/snapshot"
-
-    # v3 uses pagination; fetch up to 'limit' tickers
-    out: List[Dict[str, Any]] = []
-    next_url = None
-    batch_size = min(250, limit)  # v3 max is 250 per request
-
-    params = {"ticker.gte": "A", "limit": batch_size, "apiKey": api_key}
+    url = f"{BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers"
+    params = {"limit": limit, "apiKey": api_key}
 
     with _session() as s:
-        while len(out) < limit:
-            if next_url:
-                # Append API key to next_url (pagination URLs don't include it)
-                sep = "&" if "?" in next_url else "?"
-                resp = s.get(f"{next_url}{sep}apiKey={api_key}", timeout=HTTP_TIMEOUT)
-            else:
-                resp = s.get(url, params=params, timeout=HTTP_TIMEOUT)
+        resp = s.get(url, params=params, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
 
-            resp.raise_for_status()
-            data = resp.json()
-
-            results = data.get("results", []) or []
-            for r in results:
-                session = r.get("session", {}) or {}
-                out.append({
-                    "ticker": r.get("ticker"),
-                    "last_price": session.get("price"),
-                    "prev_close": session.get("previous_close"),
-                    "volume": session.get("volume"),
-                    "open": session.get("open"),
-                    "high": session.get("high"),
-                    "low": session.get("low"),
-                    "close": session.get("close"),
-                })
-
-                if len(out) >= limit:
-                    break
-
-            # Check for pagination
-            next_url = data.get("next_url")
-            if not next_url or len(out) >= limit:
-                break
-
-    return out[:limit]
+    tickers = data.get("tickers", []) or []
+    out: List[Dict[str, Any]] = []
+    for t in tickers:
+        out.append(
+            {
+                "ticker": t.get("ticker"),
+                "last_price": t.get("lastTrade", {}).get("p"),
+                "prev_close": t.get("prevDay", {}).get("c"),
+                "volume": t.get("day", {}).get("v"),   # today's volume (exchange session)
+                "open": t.get("day", {}).get("o"),
+                "high": t.get("day", {}).get("h"),
+                "low": t.get("day", {}).get("l"),
+                "close": t.get("day", {}).get("c"),
+            }
+        )
+    return out
 
 
 ## -------------------------------------------------------------------
-## BLOCK: get-snapshot-single  |  FILE: src/adapters/polygon_adapter.py  |  DATE: 2025-10-01
+## BLOCK: get-snapshot-single  |  FILE: src/adapters/polygon_adapter.py  |  DATE: 2025-09-30
 ## PURPOSE: Fetch single-ticker snapshot (for hybrid enrichment)
 ## NOTES:
-##   - Uses v3 API for extended hours support
-##   - Returns dict compatible with bulk fetch_snapshots shape
+##   - Returns raw JSON from Polygon, trimmed to common fields
+##   - Compatible with bulk fetch_snapshots shape
 ## -------------------------------------------------------------------
 def get_snapshot(ticker: str) -> Dict[str, Any]:
     api_key = _require_api_key()
-    url = f"{BASE_URL}/v3/snapshot"
+    url = f"{BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}"
 
     with _session() as s:
-        resp = s.get(url, params={"ticker.any_of": ticker, "apiKey": api_key}, timeout=HTTP_TIMEOUT)
+        resp = s.get(url, params={"apiKey": api_key}, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json() or {}
 
-    results = data.get("results", [])
-    if not results:
+    t = data.get("ticker", {})
+    if not t:
         return {}
 
-    r = results[0]
-    session = r.get("session", {}) or {}
-
     return {
-        "ticker": r.get("ticker"),
-        "last_price": session.get("price"),
-        "prev_close": session.get("previous_close"),
-        "volume": session.get("volume"),
-        "open": session.get("open"),
-        "high": session.get("high"),
-        "low": session.get("low"),
-        "close": session.get("close"),
+        "ticker": t.get("ticker"),
+        "last_price": t.get("lastTrade", {}).get("p"),
+        "prev_close": t.get("prevDay", {}).get("c"),
+        "volume": t.get("day", {}).get("v"),
+        "open": t.get("day", {}).get("o"),
+        "high": t.get("day", {}).get("h"),
+        "low": t.get("day", {}).get("l"),
+        "close": t.get("day", {}).get("c"),
     }
 ## -------------------------------------------------------------------
 

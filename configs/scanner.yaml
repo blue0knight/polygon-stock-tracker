@@ -4,7 +4,7 @@
 
 premarket:
   start_time: "04:00"      # ET, earliest candles to scan
-  end_time: "09:30"        # ET, stop at market open (then run open_selection)
+  end_time: "11:30"        # ET, accounts for 15 min delay at open
   cadence_minutes: 5       # keep 5 min polling
 
 postmarket:
@@ -13,8 +13,8 @@ postmarket:
   cadence_minutes: 5      # same as premarket
 
 open_selection:
-  selection_window: "09:50-09:55"   # Pick at 9:50 ET (15min into session for confirmation)
-  candidate_pool_size: 20           # Top 20 gappers to evaluate
+  selection_window: "09:30-09:35"   # default if omitted - 09:30 - 09:35
+  candidate_pool_size: 20          # default: 100
 
 # -------------------------------------------------------------------
 # Scoring Weights
@@ -90,14 +90,14 @@ liquidity:
     min_intraday_shares: 100       # default: 5000
     min_avg_daily_volume: 100000    # default: 500000
     min_dollar_volume: 5000        # default: 25000
-    min_price: 1.0                  # $1 minimum for both current price AND prev_close (NASDAQ compliance)
+    min_price: 0.5                  # default: 1.0
     require_prices: true
 
   regular:
-    min_intraday_shares: 50000    # Lowered for small-cap gappers (was 100000)
-    min_avg_daily_volume: 100000  # Lowered to capture penny stocks (was 500000)
-    min_dollar_volume: 50000      # Lowered for small-cap plays (was 300000)
-    min_price: 1.0                # $1 minimum for both current price AND prev_close (NASDAQ compliance)
+    min_intraday_shares: 100000   # default: 500000
+    min_avg_daily_volume: 500000  # default: 300000
+    min_dollar_volume: 300000     # default: 100000
+    min_price: 1.0
     require_prices: true
 # END liquidity-dual
 
@@ -105,10 +105,10 @@ liquidity:
 # Group Watchlist (logs only)
 # -------------------------------------------------------------------
 group_watchlist:
+  - SPHL
+  - TWG
+  - MASK
   - RVYL
-  - UCFI
-  - CJET
-  - EPSM
 
 
 # -------------------------------------------------------------------
